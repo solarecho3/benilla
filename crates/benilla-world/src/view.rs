@@ -73,10 +73,14 @@ pub struct ViewDistance {
     pub nearclip: f32,
 }
 
-/// The settable range of [`ViewDistance::farclip`]: the reference's `farclip` clamp,
-/// `[0x81021c]` = 177 to `[0x80fed8]` = 777 in its validate callback `0x688d40`; shared by the
-/// CVar apply, the options row and `$WOW_FARCLIP`.
-pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = 177.0..=777.0;
+/// The 1.12 `farclip` floor (`[0x81021c]`, validate callback `0x688d40`).
+pub const FARCLIP_MIN: f32 = 177.0;
+/// Past the 1.12 777-yd cap (`[0x80fed8]`), still on that slider's 177 + n×60 ladder
+/// (`OptionsFrame.lua:26`): 177 + 18×60 = 1257.
+pub const FARCLIP_MAX: f32 = 1257.0;
+/// The settable range of [`ViewDistance::farclip`], shared by the CVar apply, the options row
+/// and `$WOW_FARCLIP`.
+pub const FARCLIP_RANGE: std::ops::RangeInclusive<f32> = FARCLIP_MIN..=FARCLIP_MAX;
 
 /// The settable range of [`ViewDistance::nearclip`]: the bounds in the reference's `nearclip`
 /// change callback `0x688d90`, `[0x8029d0]` = 0.01 and `[0x808300]` = 0.33.
@@ -334,10 +338,59 @@ pub fn stamp_near_clip(
         }
     }
 }
-/// The vertical field of view in radians, shared by the projection and every consumer of the near
-/// rectangle: 45°, Bevy's `PerspectiveProjection` default; the reference's follows the aspect,
-/// 44.1° at 16:9.
-pub const CAM_FOVY: f32 = std::f32::consts::FRAC_PI_4;
+/// 1.12's world projection (`0x5c3cc0`): vertical FOV is `(π/2) / √(aspect² + 1)`, from the
+/// camera constructor's π/2 (`0x50a707`) and the half-angle `fov / (2·√(aspect²+1))`.
+/// 54.0° at 4:3, 47.7° at 16:10, 44.1° at 16:9, 35.0° at 21:9.
+pub fn reference_fovy(aspect: f32) -> f32 {
+    let a = aspect.max(1e-6_f32);
+    std::f32::consts::FRAC_PI_2 / (a * a + 1.0).sqrt()
+}
+
+/// How [`cam_fovy`] treats a window wider than 16:9.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FovPolicy {
+    /// The reference: vertical FOV shrinks as the window widens, keeping a 90° diagonal.
+    Reference,
+    /// Keep 16:9's vertical field on wider windows, so ultrawide shows more world on the sides.
+    HorPlus,
+}
+
+/// `$WOW_FOV=reference` uses 1.12's formula at every aspect. Unset, and any other value, is Hor+:
+/// a 21:9 window keeps 16:9's 44.1° vertical field instead of shrinking to 35°.
+pub fn fov_policy() -> FovPolicy {
+    match std::env::var("WOW_FOV").as_deref() {
+        Ok("reference") => FovPolicy::Reference,
+        _ => FovPolicy::HorPlus,
+    }
+}
+
+/// Vertical FOV for the world camera at this width÷height. Matches [`reference_fovy`] at 16:9 and
+/// narrower; [`FovPolicy::HorPlus`] pins the 16:9 value on a wider window.
+pub fn cam_fovy(aspect: f32) -> f32 {
+    cam_fovy_with(aspect, fov_policy())
+}
+
+/// [`cam_fovy`] with the policy passed in, so a test does not read the environment.
+pub fn cam_fovy_with(aspect: f32, policy: FovPolicy) -> f32 {
+    let a = aspect.max(1e-6_f32);
+    let wide = 16.0_f32 / 9.0;
+    match policy {
+        FovPolicy::HorPlus if a > wide => reference_fovy(wide),
+        _ => reference_fovy(a),
+    }
+}
+
+/// Width÷height of a window; 16:9 when the size is not yet known.
+pub fn aspect_or_16x9(width: f32, height: f32) -> f32 {
+    if height > 1e-6_f32 && width.is_finite() && height.is_finite() {
+        (width / height).max(1e-6_f32)
+    } else {
+        16.0 / 9.0
+    }
+}
+
+/// 16:9 value of [`reference_fovy`] (44.1°), the Hor+ floor and the previous `π/4` stand-in.
+pub const CAM_FOVY: f32 = 0.770_100_55;
 
 /// The world camera's pose made current within `Update`, for every viewer authority there: Bevy
 /// propagates `GlobalTransform` in `PostUpdate`, a whole jump late after a teleport snap.
@@ -536,6 +589,31 @@ mod tests {
             Vec3::new(0.0, 0.0, 5000.0),
             0.0
         ));
+    }
+
+    /// Issue #124: 1.12's vertical field is `(π/2)/√(A²+1)`, not a fixed 45°.
+    #[test]
+    fn the_reference_vertical_field_follows_the_aspect() {
+        let deg = |a: f32| reference_fovy(a).to_degrees();
+        assert!((deg(4.0 / 3.0) - 54.0).abs() < 0.05);
+        assert!((deg(16.0 / 10.0) - 47.7).abs() < 0.05);
+        assert!((deg(16.0 / 9.0) - 44.1).abs() < 0.05);
+        assert!((deg(2560.0 / 1080.0) - 35.0).abs() < 0.05);
+        assert!((CAM_FOVY - reference_fovy(16.0 / 9.0)).abs() < 1e-5);
+        assert!((CAM_FOVY.to_degrees() - 44.1).abs() < 0.05);
+    }
+
+    /// Hor+ keeps 16:9's vertical field on a 21:9 window; the reference shrinks it.
+    #[test]
+    fn horplus_keeps_the_sixteen_by_nine_vertical_field_on_ultrawide() {
+        let a21 = 3440.0 / 1440.0;
+        let a16 = 16.0 / 9.0;
+        assert!((cam_fovy_with(a21, FovPolicy::HorPlus) - reference_fovy(a16)).abs() < 1e-6);
+        assert!((cam_fovy_with(a21, FovPolicy::Reference) - reference_fovy(a21)).abs() < 1e-6);
+        assert!((cam_fovy_with(a16, FovPolicy::HorPlus) - reference_fovy(a16)).abs() < 1e-6);
+        assert!(
+            (cam_fovy_with(4.0 / 3.0, FovPolicy::HorPlus) - reference_fovy(4.0 / 3.0)).abs() < 1e-6
+        );
     }
 }
 

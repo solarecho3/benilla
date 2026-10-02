@@ -647,32 +647,49 @@ fn decodes_m2_collision_hulls() {
         "hull indices in range"
     );
 
+    // The file still authors a hull (52 tris vanilla, 412 in patch-D); both ground extents
+    // are ≥ 8 yd, so walking drops it. Empty grass around the oak is walkable; the trunk
+    // doodad keeps its own hull.
     let canopy = benilla_formats::load_m2_collision_hull(
         &mut chain,
         "World\\Azeroth\\Elwynn\\PassiveDoodads\\Trees\\ElwynnTreeCanopy01.mdx",
     )
     .expect("canopy hull");
-    assert_eq!(
-        canopy.triangle_count(),
-        52,
-        "ElwynnTreeCanopy01 hull = 52 tris"
-    );
-    assert_eq!(
-        canopy.positions.len(),
-        30,
-        "ElwynnTreeCanopy01 hull = 30 verts"
+    assert!(
+        canopy.is_empty(),
+        "ElwynnTreeCanopy01 is a canopy volume and must not block walking, got {} tris",
+        canopy.triangle_count()
     );
 
-    let bounds = benilla_formats::load_m2_bounds(
-        &mut chain,
-        "World\\Azeroth\\Elwynn\\PassiveDoodads\\Trees\\ElwynnTreeCanopy01.mdx",
-    )
-    .expect("canopy bounds");
-    let render_x = bounds.bbox_max[0] - bounds.bbox_min[0];
-    let hull_x = span3(&canopy.positions)[0];
+    let canopy_raw = {
+        let bytes = chain
+            .read_file("world\\azeroth\\elwynn\\passivedoodads\\trees\\elwynntreecanopy01.m2")
+            .expect("read canopy m2");
+        benilla_formats::parse_m2_collision_hull(&bytes).expect("raw canopy hull")
+    };
+    let s = span3(&canopy_raw.positions);
     assert!(
-        hull_x < render_x * 0.6,
-        "collision hull (X span {hull_x:.1}) should be far tighter than the render bbox ({render_x:.1})"
+        s[0] >= 8.0 && s[1] >= 8.0,
+        "raw canopy hull is fat in both ground axes, got X={:.2} Y={:.2}",
+        s[0],
+        s[1]
+    );
+
+    let fence = benilla_formats::load_m2_collision_hull(
+        &mut chain,
+        "World\\Azeroth\\Elwynn\\PassiveDoodads\\ElwynnFences\\ElwynnWoodFence01.mdx",
+    )
+    .expect("fence hull");
+    assert!(
+        fence.triangle_count() > 0,
+        "a thin fence must still collide"
+    );
+    let fs = span3(&fence.positions);
+    assert!(
+        fs[0].min(fs[1]) < 8.0,
+        "fence is thin on one ground axis, got X={:.2} Y={:.2}",
+        fs[0],
+        fs[1]
     );
 }
 

@@ -660,6 +660,8 @@ fn resolve_slot(
     let template: Option<ItemInfo> = items.template(entry, guid, commands).cloned();
     let Some(t) = template else {
         // Asked (or a cached negative); show the slot occupied while the answer is in flight.
+        // A stub link keeps GetContainerItemLink in step with a truthy itemCount: pfUI
+        // GetItemCount strfinds the link and used to raise on nil.
         return Some(ContainerSlot {
             durability: None,
             item_id: entry,
@@ -670,6 +672,7 @@ fn resolve_slot(
             already_bound,
             enchants: enchant_lines,
             duration_ms,
+            link: Some(crate::ui_items::item_link(entry, "", 1)),
             ..Default::default()
         });
     };

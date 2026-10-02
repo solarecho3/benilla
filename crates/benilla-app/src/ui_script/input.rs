@@ -1,7 +1,7 @@
 //! The player-UI input pass: [`feed_ui_input`] feeds mouse and keyboard events into the UI engine
 //! once [`super::extract::tick_script`] has resolved the frame's rects.
 
-use bevy::input::keyboard::KeyboardInput;
+use bevy::input::keyboard::{KeyCode, KeyboardInput};
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
@@ -216,6 +216,7 @@ pub(super) fn feed_ui_input(
     // ── Keyboard → VM ── box-event keys go to `key_input` by name, editing keys through the
     // per-OS chord table as an `EditAction` or a clipboard operation (the macOS NSPasteboard
     // needs this main-thread system), the rest to `char_input`. Repeats arrive as `Pressed`.
+    // A matching `Released` delivers `OnKeyUp` to the frame that consumed that code's down.
     let sup = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
     let mods = keymap::Mods {
         shift,
@@ -225,6 +226,12 @@ pub(super) fn feed_ui_input(
     };
     let mac = cfg!(target_os = "macos");
     for ev in keyboard.read() {
+        if ev.state == ButtonState::Released {
+            if let Some(name) = ui_key_name(ev.key_code, &layout) {
+                script.key_up_input(&name);
+            }
+            continue;
+        }
         if ev.state != ButtonState::Pressed {
             continue;
         }
@@ -338,6 +345,25 @@ pub(super) fn feed_ui_input(
 
     for err in script.take_errors() {
         warn!("ui_script(input): {err}");
+    }
+}
+
+/// The name [`UiScript::key_input`] / [`UiScript::frame_key_input`] / [`UiScript::key_up_input`]
+/// speak in for this physical key, matching the press path's `arg1`.
+fn ui_key_name(key_code: KeyCode, layout: &crate::bindings::LayoutNames) -> Option<String> {
+    match key_code {
+        KeyCode::Enter | KeyCode::NumpadEnter => Some("ENTER".into()),
+        KeyCode::Escape => Some("ESCAPE".into()),
+        KeyCode::Tab => Some("TAB".into()),
+        KeyCode::Backspace => Some("BACKSPACE".into()),
+        KeyCode::Delete => Some("DELETE".into()),
+        KeyCode::ArrowLeft => Some("LEFT".into()),
+        KeyCode::ArrowRight => Some("RIGHT".into()),
+        KeyCode::ArrowUp => Some("UP".into()),
+        KeyCode::ArrowDown => Some("DOWN".into()),
+        KeyCode::Home => Some("HOME".into()),
+        KeyCode::End => Some("END".into()),
+        _ => crate::bindings::chord::key_token(key_code, layout).map(|t| t.to_string()),
     }
 }
 

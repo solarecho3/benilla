@@ -570,7 +570,6 @@ fn the_unfired_script_kinds_still_raise_rather_than_silently_accepting() {
         "OnAttributeChanged",
         // Real 1.12 slots that benilla does not fire.
         "OnHyperlinkEnter",
-        "OnMessageScrollChanged",
         "OnInputLanguageChanged",
     ] {
         let err = s

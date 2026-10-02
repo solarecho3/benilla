@@ -275,6 +275,29 @@ mod tests {
         );
     }
 
+    /// Eastvale Peasant waypoint script 1132803 plays these two kits. They are the WC3
+    /// peasant What/Pissed barks ("More work?", "There's no one else available"), not looping.
+    #[test]
+    fn eastvale_peasant_script_kits_are_peasant_barks() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_sound_kit_catalog(&mut chain).expect("load sound kits");
+
+        let what = cat.get(6288).expect("kit 6288");
+        let yes = cat.get(6242).expect("kit 6242");
+        assert_eq!(what.name, "B_PeasantWhat3");
+        assert_eq!(yes.name, "B_PeasantYesAttack3");
+        for kit in [what, yes] {
+            assert_eq!(kit.sound_type, 10, "{} is a creature bark", kit.name);
+            assert_eq!(kit.flags, sound_kit_flags::NO_DUPLICATES, "{} is no-duplicates, not looping", kit.name);
+            assert_eq!(kit.min_distance, 8.0);
+            assert_eq!(kit.distance_cutoff, 45.0);
+            assert_eq!(kit.files.len(), 1);
+        }
+        assert_eq!(what.files[0].0, "Sound\\Creature\\Peasant\\PeasantWhat3.wav");
+        assert_eq!(yes.files[0].0, "Sound\\Creature\\Peasant\\PeasantYesAttack3.wav");
+    }
+
     /// The two forced ambience rows, by the exact names `0x4609b0` compares: row 4160 and row 4209,
     /// where no row is named plain `Ghost` and 4123 `UnderWaterLoop` is a different row of the
     /// same file.

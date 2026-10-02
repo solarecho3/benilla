@@ -1,7 +1,8 @@
 //! Character appearance render data: the geosets an appearance shows ([`CharacterGeosets`], the
 //! client's geoset dispatch `0x477520`) and the body skin it wears: body-skin batches
 //! (`M2TextureType::Other(1)`) have no texture of their own, and [`CharSections::composite_body`]
-//! builds one on the 256² partition `0x475c50` and the section→cell map `0x4782e0`.
+//! builds one on the 256² partition `0x475c50` (scaled to the base skin, 512² or 1024² on HD
+//! packs) and the section→cell map `0x4782e0`.
 //!
 //! DBC layouts follow the client's record readers: CharSections `0x575540`, the geoset tables
 //! `0x5753b0`/`0x575a80`.

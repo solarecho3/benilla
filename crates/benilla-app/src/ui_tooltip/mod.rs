@@ -141,6 +141,19 @@ fn drive_mouseover_tooltip(
         // The hovered guid, the pair `0x492890` writes to `0xb4e2c8`/`0xb4e2cc` and the token
         // resolver `0x515970` reads for `"mouseover"`, so `UnitIsUnit` can match it.
         let mut s = snapshot(store, guid, name, reaction, chr, types);
+        s.can_attack = crate::target::can_attack(
+            Some(store),
+            rx.factions.as_deref(),
+            &rx.reputations,
+            self_store,
+        );
+        s.can_assist = crate::target::can_assist(
+            Some(store),
+            rx.factions.as_deref(),
+            &rx.reputations,
+            self_store,
+            |_| None,
+        );
         enrich_unit(
             &mut s,
             guid,
@@ -325,20 +338,37 @@ fn drive_mouseover_tooltip(
                         }
                     }
                 }
-                // Every skill lock takes the opener-unknown arm, silent on a flag-locked object;
-                // the known arm, `LOCKED_WITH_SPELL_KNOWN` in the margin ramp's colour
-                // (`0x529fa0`), is not built.
+                // Skill lock, silent on a flag-locked object. The known arm is
+                // `LOCKED_WITH_SPELL_KNOWN` in the resolver's colour (`0x529fa0`); both keys read
+                // "Requires %s" in enUS, so the tint is the known/unknown distinction.
                 benilla_formats::LOCK_KEY_SKILL if !flag_locked => {
-                    // `LOCKED_WITH_SPELL` (`0x52ac04`), named by `LockType.dbc` ("Pick Lock"); the
-                    // reference takes the known arm iff any known spell opens it (`0x52abcb`).
+                    let facts = crate::target::lock::go_facts(go_store.map(|s| (s, state)));
+                    let mut matched = None;
+                    let outcome = slots.map(|slots| {
+                        crate::target::lock::resolve_lock(
+                            slots,
+                            &player_actions.spells,
+                            go_inputs.spells.as_deref(),
+                            go_inputs.skill_lines.as_ref().map(|s| &s.catalog),
+                            self_store,
+                            &go_inputs.objects,
+                            facts,
+                            &mut matched,
+                        )
+                    });
+                    // `0x52abcb`: known iff any known spell opens this LockType, before the value
+                    // test. `LOCKED_WITH_SPELL` (`0x52ac04`) is the unknown arm.
+                    let key = if matched.is_some() {
+                        "LOCKED_WITH_SPELL_KNOWN"
+                    } else {
+                        "LOCKED_WITH_SPELL"
+                    };
                     let word = go_inputs
                         .lock_types
                         .as_deref()
                         .and_then(|c| c.0.name(slot0.index));
-                    if let Some(text) =
-                        word.and_then(|w| keyed(&go_get, "LOCKED_WITH_SPELL", &[Arg::S(w)]))
-                    {
-                        lines.push((text, TooltipTint::Red));
+                    if let Some(text) = word.and_then(|w| keyed(&go_get, key, &[Arg::S(w)])) {
+                        lines.push((text, locked_line_tint(outcome)));
                     }
                 }
                 _ => {}

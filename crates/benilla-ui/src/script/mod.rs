@@ -184,7 +184,7 @@ pub use cvars::{small_cull_text, sstr_to_int};
 pub use cvars::{
     MultisampleFormat, ScreenResolution, SeededCvar, VideoCaps, CVAR_FRILL_DENSITY, CVAR_GAMMA,
     CVAR_SMALL_CULL, CVAR_WORLD_DETAIL, IN_WORLD_READ_ONLY_CVARS, VIDEO_DEFAULT_CVARS,
-    WORLD_DETAIL_STOPS,
+    WORLD_DETAIL_MAX_STOP, WORLD_DETAIL_STOPS,
 };
 pub use death::{DeathAction, DeathUiState};
 pub use dressup::DressUpIntent;
@@ -399,7 +399,7 @@ pub const SCREEN: crate::layout::Handle = 0;
 /// ScrollFrame's three scroll kinds are `+0x32c`/`+0x334`/`+0x33c` (script-name map `0x786c40`).
 /// The EditBox's vtable (`0x81c910`) replaces the key and char slots: an EditBox never fires
 /// `OnKeyDown`, and fires `OnChar` only from `Insert`, with the inserted text (`0x77c13c`).
-const SCRIPT_KINDS: [&str; 39] = [
+const SCRIPT_KINDS: [&str; 40] = [
     "OnLoad",
     "OnEvent",
     "OnUpdate",
@@ -437,6 +437,8 @@ const SCRIPT_KINDS: [&str; 39] = [
     // A release over a message-frame hyperlink span, `OnHyperlinkClick(link, text, button)`;
     // `ChatFrameTemplate` passes it to `SetItemRef` (`ChatFrame.xml:15`, `ChatFrame.lua:1534`).
     "OnHyperlinkClick",
+    // ScrollingMessageFrame scroll (`CSimpleMessageScrollFrame`), fired by every `Scroll*` call.
+    "OnMessageScrollChanged",
     // The GameTooltip's engine-fired scripts: money render, money clear and world-hover default
     // placement, all three wired by the stock template (`GameTooltipTemplate.xml:617-625`).
     "OnTooltipAddMoney",
@@ -449,9 +451,9 @@ const SCRIPT_KINDS: [&str; 39] = [
     "OnDoubleClick",
     // The layout event (base map `0x76a0d0`, `+0x120`), fired by the resolve pass on a size change.
     "OnSizeChanged",
-    // The key channels, fired by [`keyboard`]'s walk (`0x765f10`). `OnKeyUp` never fires, as the
-    // host feeds no key-up, but a frame carrying only `OnKeyUp` still consumes every key-down and
-    // runs nothing, the reference's own asymmetry.
+    // The key channels, fired by [`keyboard`]'s walk (`0x765f10`). A key-down consumes on
+    // `OnKeyDown` or `OnKeyUp` and fires only `OnKeyDown`; the matching key-up fires `OnKeyUp` on
+    // that down's sticky consumer (`0x76bba0`).
     "OnChar",
     "OnKeyDown",
     "OnKeyUp",
@@ -1040,7 +1042,20 @@ impl UiScript {
     /// [`Self::editbox_action`]. A focused box consumes a key even when it does nothing with it.
     pub fn key_input(&mut self, key: &str) -> bool {
         // The same two stages as `char_input`.
-        keyboard::key_input(&self.lua, key) || editbox::key_input(&self.lua, key)
+        if keyboard::key_input(&self.lua, key) {
+            return true;
+        }
+        if editbox::key_input(&self.lua, key) {
+            keyboard::latch_focused_key_down(&self.lua, key);
+            return true;
+        }
+        false
+    }
+
+    /// The matching key-up of [`Self::key_input`] / [`Self::frame_key_input`]: `OnKeyUp` on the
+    /// frame that consumed this code's down. `true` if that frame was still live and had the slot.
+    pub fn key_up_input(&mut self, key: &str) -> bool {
+        keyboard::key_up_input(&self.lua, key)
     }
 
     /// An editing key (BACKSPACE, DELETE, the arrows, HOME, END) offered to the keyboard frames

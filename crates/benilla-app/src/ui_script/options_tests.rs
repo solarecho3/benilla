@@ -368,6 +368,7 @@ fn search_reflows_live_rows_and_restores_the_page() {
         ("BenillaOptionsFrameContainerBodySearchHeadGraphics", false),
         ("BenillaOptionsFrameContainerBodyAudioRowMusic", true),
         ("BenillaOptionsFrameContainerBodyAudioRowEnableMusic", true),
+        ("BenillaOptionsFrameContainerBodyAudioRowLoopMusic", true),
         ("BenillaOptionsFrameContainerBodyAudioRowMaster", true), // the parent, pulled in unmatched
         ("BenillaOptionsFrameContainerBodyAudioRowSound", false),
         ("BenillaOptionsFrameContainerBodyAudioRowEnableAll", false),
@@ -388,12 +389,13 @@ fn search_reflows_live_rows_and_restores_the_page() {
         "BenillaOptionsFrameContainerBodyAudioRowMaster",
         "BenillaOptionsFrameContainerBodyAudioRowMusic",
         "BenillaOptionsFrameContainerBodyAudioRowEnableMusic",
+        "BenillaOptionsFrameContainerBodyAudioRowLoopMusic",
     ]
     .iter()
     .map(|f| s.eval::<f32>(&format!("return {f}:GetTop()")).unwrap())
     .collect();
     assert!(
-        tops[0] > tops[1] && tops[1] > tops[2] && tops[2] > tops[3],
+        tops[0] > tops[1] && tops[1] > tops[2] && tops[2] > tops[3] && tops[3] > tops[4],
         "head, parent, then the matches chain downward: {tops:?}"
     );
     let _ = s.take_cvar_changes();
@@ -927,6 +929,41 @@ fn the_background_sound_row_boots_off_and_writes_the_era_cvar() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// 1.12 SoundOptionsFrameCheckButton8: ENABLE_MUSIC_LOOPING / `SoundZoneMusicNoDelay`. The
+/// registered default is off; a click writes the CVar the zone pump already honors.
+#[test]
+fn the_loop_music_row_boots_off_and_writes_the_cvar() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click()")
+        .unwrap();
+    let _ = s.take_cvar_changes();
+
+    assert!(
+        !s.eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyAudioRowLoopMusicCheck:GetChecked()"
+        )
+        .unwrap(),
+        "the 1.12 registration default is off"
+    );
+    s.run("BenillaOptionsFrameContainerBodyAudioRowLoopMusicCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("SoundZoneMusicNoDelay".to_string(), "1".to_string())]
+    );
+
+    s.run("BenillaOptionsFrameContainerBodyAudioRowEnableAllCheck:Click()")
+        .unwrap();
+    assert!(s
+        .eval::<bool>(
+            "return BenillaOptionsFrameContainerBodyAudioRowLoopMusicCheck:IsEnabled() ~= 0"
+        )
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Defaults is the era's per-page reset, to the registered defaults.
 #[test]
 fn defaults_resets_the_audio_page_to_registered_defaults() {
@@ -1229,11 +1266,11 @@ fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
         "reading the table on select must not write it back"
     );
 
-    // The reference's grid: three stops, one apart (`OptionsFrame.lua:27`).
+    // 0..15, one apart: 1.12's three stops plus pfUI hdgraphic's Ultra range.
     assert!(s
         .eval::<bool>(&format!(
             "local lo, hi = {ROW}ControlSlider:GetMinMaxValues() \
-             return lo == 0 and hi == 2 and {ROW}ControlSlider:GetValueStep() == 1"
+             return lo == 0 and hi == 15 and {ROW}ControlSlider:GetValueStep() == 1"
         ))
         .unwrap());
 
@@ -1246,6 +1283,17 @@ fn the_world_detail_slider_writes_the_cvar_and_the_readout_names_its_stop() {
         s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
             .unwrap(),
         "High"
+    );
+
+    s.run(&format!("{ROW}ControlSlider:SetValue(15)")).unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("WorldDetail".to_string(), "15".to_string())]
+    );
+    assert_eq!(
+        s.eval::<String>(&format!("return {ROW}ControlValue:GetText()"))
+            .unwrap(),
+        "Ultra"
     );
 
     s.run(&format!("{ROW}ControlSlider:SetValue(0.6)")).unwrap();

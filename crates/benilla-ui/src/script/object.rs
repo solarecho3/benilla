@@ -302,13 +302,11 @@ fn frame_kind_from_str(s: &str) -> Option<FrameKind> {
     })
 }
 
-/// A Lua number-ish → f32 (nil/other → 0.0), for offset/color args.
+/// Shape C / `lua_tonumber` (`0x6f3620`): a number, or a string a full `strtod` consumes after
+/// trim (pfUI's `strsplit` colour channels are `"1"`, `".2"`), else 0.0. Used for colour and
+/// offset args so `SetTextColor(unpack({"1","1","0","1"}))` is yellow, not black.
 pub(super) fn as_f32(v: &Value) -> f32 {
-    match v {
-        Value::Number(n) => *n as f32,
-        Value::Integer(i) => *i as f32,
-        _ => 0.0,
-    }
+    as_f64(v) as f32
 }
 
 /// [`as_f32`] in `f64`, for `ColorSelect:SetColorRGB`, whose quantizer an `f32` detour could push
@@ -317,8 +315,55 @@ pub(super) fn as_f64(v: &Value) -> f64 {
     match v {
         Value::Number(n) => *n,
         Value::Integer(i) => *i as f64,
+        Value::String(s) => numeric_string(s).unwrap_or(0.0),
         _ => 0.0,
     }
+}
+
+/// `lua_isnumber` for a Lua string: non-empty trim that fully parses as a float.
+pub(super) fn numeric_string(s: &mlua::String) -> Option<f64> {
+    let t = s.to_str().ok()?;
+    let t = t.trim();
+    if t.is_empty() {
+        return None;
+    }
+    t.parse().ok()
+}
+
+/// Whether `v` is a number or a numeric string, the colour-form gate `SetTexture` shares with
+/// `lua_isnumber` (`0x6f34d0`).
+pub(super) fn is_lua_number(v: &Value) -> bool {
+    match v {
+        Value::Number(_) | Value::Integer(_) => true,
+        Value::String(s) => numeric_string(s).is_some(),
+        _ => false,
+    }
+}
+
+/// Shape B colour alpha (`0x778220`): `lua_isnumber` then tonumber, else `default` (1.0 on a
+/// Texture, the previous alpha on a Font). A missing argument is nil here, so it takes `default`.
+pub(super) fn color_alpha(v: &Value, default: f32) -> f32 {
+    if is_lua_number(v) {
+        as_f32(v)
+    } else {
+        default
+    }
+}
+
+/// Shape C r,g,b plus shape B alpha, the tuple every `Set*Color` stores.
+pub(super) fn color_rgba(
+    r: &Value,
+    g: &Value,
+    b: &Value,
+    a: &Value,
+    alpha_default: f32,
+) -> [f32; 4] {
+    [
+        as_f32(r),
+        as_f32(g),
+        as_f32(b),
+        color_alpha(a, alpha_default),
+    ]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────

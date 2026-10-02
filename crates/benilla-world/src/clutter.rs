@@ -31,7 +31,7 @@ impl Plugin for ClutterPlugin {
             .add_systems(
                 Update,
                 (
-                    remesh_on_cutout_change,
+                    remesh_on_clutter_material_change,
                     stream_chunk_clutter,
                     evict_clutter_geometry,
                     scope_clutter_geometry,
@@ -41,19 +41,20 @@ impl Plugin for ClutterPlugin {
     }
 }
 
-/// Drop the built meshes when the cutout value moves (a density write must not re-mesh): the ref is
-/// baked into the material. The reference's `detailDoodadAlpha` is a console command (`0x6739a0`,
-/// registered at `0x63f9e0`), not a CVar, so it never persists.
-fn remesh_on_cutout_change(
+/// Drop the built meshes when the cutout or fade horizon moves (a density write must not re-mesh):
+/// both are baked into the material. The reference's `detailDoodadAlpha` is a console command
+/// (`0x6739a0`, registered at `0x63f9e0`), not a CVar, so it never persists.
+fn remesh_on_clutter_material_change(
     mut commands: Commands,
     cfg: Res<ClutterConfig>,
     mut chunks: Query<&mut ClutterChunk>,
-    mut last: Local<Option<f32>>,
+    mut last: Local<Option<(f32, f32)>>,
 ) {
-    let Some(prev) = last.replace(cfg.alpha_ref) else {
+    let now = (cfg.alpha_ref, cfg.fade_far);
+    let Some(prev) = last.replace(now) else {
         return;
     };
-    if prev == cfg.alpha_ref {
+    if prev == now {
         return;
     }
     let mut n = 0;
@@ -63,10 +64,18 @@ fn remesh_on_cutout_change(
             n += 1;
         }
     }
-    info!(
-        "clutter: detailDoodadAlpha {} — dropped {n} built mesh(es) to re-cut",
-        (cfg.alpha_ref * 255.0).round() as u32
-    );
+    if prev.0 != now.0 {
+        info!(
+            "clutter: detailDoodadAlpha {} — dropped {n} built mesh(es) to re-cut",
+            (cfg.alpha_ref * 255.0).round() as u32
+        );
+    }
+    if prev.1 != now.1 {
+        info!(
+            "clutter: fade horizon {:.0} yd — dropped {n} built mesh(es) to re-fade",
+            cfg.fade_far
+        );
+    }
 }
 
 /// Drop the decoded clutter geometry on a map change; the new map decodes its own models.
@@ -120,8 +129,36 @@ pub(crate) struct GroundClutter {
 pub(crate) const DETAIL_DOODAD_ALPHA_REF: f32 = 128.0 / 255.0;
 
 /// The reference's hardcoded detail-doodad draw distance, 70 yd (`[0x867958]`); clutter fades out
-/// over its last quarter.
-pub(crate) const DETAIL_DOODAD_FADE_FAR: f32 = 70.0;
+/// over its last quarter. Stops 0..=2 keep this horizon.
+pub const DETAIL_DOODAD_FADE_FAR: f32 = 70.0;
+
+/// Fade horizon at Environment Detail 15. pfUI `hdgraphic` writes `lodDist` 250 at that stop; the
+/// grass draw distance follows it so the slider past High is a distance as well as a density.
+pub const DETAIL_DOODAD_FADE_FAR_ULTRA: f32 = 250.0;
+
+/// pfUI `hdgraphic` (`modules/hdgraphic.lua`) raises Environment Detail to this stop;
+/// `(n+1)*16` cells, 15 → `frillDensity` 256.
+pub const WORLD_DETAIL_MAX_STOP: f32 = 15.0;
+
+/// `frillDensity` for a `WorldDetail` stop: `(n+1)*16`, the 1.12 table at 0/1/2 and pfUI's
+/// formula through 15, capped at [`benilla_formats::FRILL_DENSITY_MAX`].
+pub fn world_detail_frill(stop: f32) -> f32 {
+    let n = stop.trunc().clamp(0.0, WORLD_DETAIL_MAX_STOP);
+    ((n + 1.0) * benilla_formats::FRILL_DENSITY as f32)
+        .min(benilla_formats::FRILL_DENSITY_MAX as f32)
+}
+
+/// Detail-doodad fade horizon for a `WorldDetail` stop: 70 yd through High, then stretched
+/// toward [`DETAIL_DOODAD_FADE_FAR_ULTRA`] at 15.
+pub fn fade_far_for_world_detail(stop: f32) -> f32 {
+    let n = stop.clamp(0.0, WORLD_DETAIL_MAX_STOP);
+    if n <= 2.0 {
+        DETAIL_DOODAD_FADE_FAR
+    } else {
+        let t = (n - 2.0) / (WORLD_DETAIL_MAX_STOP - 2.0);
+        DETAIL_DOODAD_FADE_FAR + t * (DETAIL_DOODAD_FADE_FAR_ULTRA - DETAIL_DOODAD_FADE_FAR)
+    }
+}
 
 /// Ground-clutter tunables. `density` scales the reference's 16 cells per chunk (`frillDensity`),
 /// and a change re-scatters loaded tiles, as the 1.12 setter rebuilds its chunks. Seeded from
@@ -135,7 +172,7 @@ pub struct ClutterConfig {
 
 impl ClutterConfig {
     /// The ground cover as the reference's `frillDensity`, cells visited per chunk; the
-    /// `WorldDetail` slider stops are 16/32/48 (`SetWorldDetail`, `0x488dd0`).
+    /// `WorldDetail` slider stops are 16/32/48 (`SetWorldDetail`, `0x488dd0`) and 64..=256 past High.
     pub fn frill_density(&self) -> f32 {
         self.density * benilla_formats::FRILL_DENSITY as f32
     }
@@ -145,6 +182,20 @@ impl ClutterConfig {
     pub fn set_frill_density(&mut self, frill: f32) {
         self.density = frill.clamp(1.0, benilla_formats::FRILL_DENSITY_MAX as f32)
             / benilla_formats::FRILL_DENSITY as f32;
+    }
+
+    /// Apply a `WorldDetail` stop: density and fade together, so Environment Detail past High
+    /// actually lengthens the grass horizon.
+    pub fn apply_world_detail(&mut self, stop: f32) {
+        let n = stop.trunc().clamp(0.0, WORLD_DETAIL_MAX_STOP);
+        self.set_frill_density(world_detail_frill(n));
+        self.fade_far = fade_far_for_world_detail(n);
+    }
+
+    /// Apply a `frillDensity` write and keep the fade horizon in step with the implied stop.
+    pub fn apply_frill_density(&mut self, frill: f32) {
+        self.set_frill_density(frill);
+        self.fade_far = fade_far_for_world_detail(self.density - 1.0);
     }
 }
 
@@ -574,5 +625,38 @@ mod tests {
         assert!(ultrawide > wide);
         // Dead ahead is the degenerate case: no width, no extra reach.
         assert!((frustum_corner_reach(0.0, 0.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn world_detail_stops_keep_vanilla_frill_and_stretch_past_high() {
+        assert_eq!(world_detail_frill(0.0), 16.0);
+        assert_eq!(world_detail_frill(1.0), 32.0);
+        assert_eq!(world_detail_frill(2.0), 48.0);
+        assert_eq!(world_detail_frill(2.9), 48.0, "truncates toward zero");
+        assert_eq!(world_detail_frill(7.0), 128.0);
+        assert_eq!(world_detail_frill(15.0), 256.0);
+        assert_eq!(world_detail_frill(99.0), 256.0);
+        assert_eq!(fade_far_for_world_detail(0.0), DETAIL_DOODAD_FADE_FAR);
+        assert_eq!(fade_far_for_world_detail(2.0), DETAIL_DOODAD_FADE_FAR);
+        assert_eq!(
+            fade_far_for_world_detail(15.0),
+            DETAIL_DOODAD_FADE_FAR_ULTRA
+        );
+        assert!(fade_far_for_world_detail(8.0) > DETAIL_DOODAD_FADE_FAR);
+        assert!(fade_far_for_world_detail(8.0) < DETAIL_DOODAD_FADE_FAR_ULTRA);
+        let mut cfg = ClutterConfig {
+            density: 2.0,
+            alpha_ref: DETAIL_DOODAD_ALPHA_REF,
+            fade_far: DETAIL_DOODAD_FADE_FAR,
+        };
+        cfg.apply_world_detail(15.0);
+        assert_eq!(cfg.density, 16.0);
+        assert_eq!(cfg.fade_far, DETAIL_DOODAD_FADE_FAR_ULTRA);
+        cfg.apply_world_detail(2.0);
+        assert_eq!(cfg.density, 3.0);
+        assert_eq!(cfg.fade_far, DETAIL_DOODAD_FADE_FAR);
+        cfg.apply_frill_density(256.0);
+        assert_eq!(cfg.density, 16.0);
+        assert_eq!(cfg.fade_far, DETAIL_DOODAD_FADE_FAR_ULTRA);
     }
 }

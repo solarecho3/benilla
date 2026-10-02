@@ -337,6 +337,7 @@ fn set_checked_uses_blizzard_bool_coercion() {
     benilla_formats::wow_data_or_skip!();
     let s = spellbook_ui(1024.0, 768.0);
     for (arg, want) in [
+        ("", true), // missing argument, GetBoolOrDefault default 1
         ("1", true),
         ("0", false),
         ("nil", false),
@@ -346,7 +347,8 @@ fn set_checked_uses_blizzard_bool_coercion() {
         ("\"false\"", false),
         ("\"1\"", true),
         ("\"0\"", false),
-        ("\"junk\"", false),
+        ("\"yes\"", true),
+        ("\"junk\"", true), // unmapped first byte takes the default
     ] {
         let got = s
             .eval::<bool>(&format!(

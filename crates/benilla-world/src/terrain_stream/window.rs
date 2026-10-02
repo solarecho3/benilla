@@ -1,4 +1,4 @@
-//! The residency window, derived from `farclip` (177..777) as the reference derives it:
+//! The residency window, derived from `farclip` ([`crate::view::FARCLIP_RANGE`]) as the reference derives it:
 //! `SetFarClip` (`0x6725d0`) sets `r = 1 + trunc(farclip / 33.333)` chunks, and the world tick
 //! (`0x672730`) centres two windows on the viewer's chunk, the inner `idx ± r` (must be resident)
 //! and the outer `idx ± max(r + 2, 8)` (requested ahead, built under 5 ms a frame). Eviction is

@@ -7,7 +7,7 @@
 use mlua::{Lua, Table, Value};
 
 use crate::script::object::frame_handle_of;
-use crate::script::{Model, UiScript};
+use crate::script::{event, Model, UiScript};
 use crate::widget::{KindState, ScrollingMessageState};
 
 /// Registry key of the ScrollingMessageFrame method table (the MAXCSTACK discipline).
@@ -59,19 +59,27 @@ fn scroll(
     op: impl FnOnce(&mut ScrollingMessageState, usize),
 ) -> mlua::Result<()> {
     let h = frame_handle_of(lua, this)?;
-    let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let viewport_rows = UiScript::message_viewport_rows(&model, h);
-    let frame = model
-        .arena
-        .frame_mut(h)
-        .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
-    match &mut frame.kind_state {
-        KindState::ScrollingMessage(smf) => {
-            op(smf, viewport_rows);
-            Ok(())
+    let id = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let viewport_rows = UiScript::message_viewport_rows(&model, h);
+        let frame = model
+            .arena
+            .frame_mut(h)
+            .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
+        match &mut frame.kind_state {
+            KindState::ScrollingMessage(smf) => op(smf, viewport_rows),
+            _ => return Err(mlua::Error::runtime("not a ScrollingMessageFrame")),
         }
-        _ => Err(mlua::Error::runtime("not a ScrollingMessageFrame")),
+        model.frame_id(h)
+    };
+    // `OnMessageScrollChanged` (WIM's scrollbar enable/disable) fires on every Scroll* call,
+    // including a no-op at an end, matching the fade re-arm.
+    if let Err(e) = event::fire_widget_handler(lua, id, "OnMessageScrollChanged", Vec::new()) {
+        lua.app_data_mut::<Model>()
+            .expect("model app_data")
+            .record_script_error(e.to_string());
     }
+    Ok(())
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -721,6 +729,30 @@ mod tests {
             s.eval::<String>("return CLICKED or 'none'").unwrap(),
             "none"
         );
+    }
+
+    #[test]
+    fn scroll_calls_fire_on_message_scroll_changed() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            n = 0
+            f = CreateFrame("ScrollingMessageFrame", "SMFScroll")
+            f:SetScript("OnMessageScrollChanged", function() n = n + 1 end)
+            f:AddMessage("a")
+            f:AddMessage("b")
+            f:AddMessage("c")
+            f:ScrollUp()
+            f:ScrollDown()
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.eval::<i64>("return n").unwrap(),
+            2,
+            "each Scroll* call fires OnMessageScrollChanged"
+        );
+        assert!(s.errors().is_empty(), "{:?}", s.errors());
     }
 
     #[test]

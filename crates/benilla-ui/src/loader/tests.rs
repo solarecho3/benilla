@@ -1947,10 +1947,23 @@ mod loader_tests {
 
     #[test]
     fn key_shape_is_screaming_snake_of_two_or_more() {
-        for yes in ["DELETE", "EXIT_GAME", "CHARACTER_POINTS1_COLON", "AB", "A1"] {
+        for yes in ["DELETE", "EXIT_GAME", "CHARACTER_POINTS1_COLON"] {
             assert!(is_global_string_key(yes), "{yes} is key-shaped");
         }
-        for no in ["X", "", "Send Mail", "No results found.", "Okay", "1", "12"] {
+        for no in [
+            "X",
+            "",
+            "Send Mail",
+            "No results found.",
+            "Okay",
+            "1",
+            "12",
+            "AB",
+            "A1",
+            "OK",
+            "WIM",
+            "YES",
+        ] {
             assert!(!is_global_string_key(no), "{no} is not key-shaped");
         }
     }

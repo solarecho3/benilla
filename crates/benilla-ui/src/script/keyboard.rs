@@ -9,9 +9,10 @@
 //! keyboard frame in a higher stratum pre-empts it and one in a lower stratum does not. A key no
 //! frame consumes falls through to the editbox routing, focus acquisition included.
 //!
-//! `OnKeyUp` is stored and gates key-downs but never fires: the host feeds no key-up, so the
-//! reference's key-up gate (`0x76bba0`, `OnKeyUp` alone) and its sticky per-code target
-//! (`0x765fd0`, `[root+code*4+0x84]`, the last frame to consume that code's down) are not built.
+//! A key-down that a frame consumes is remembered as that code's sticky target
+//! ([`Model::key_down_on`], the reference's `[root+code*4+0x84]` at `0x765fd0`). The matching
+//! key-up fires `OnKeyUp` on that frame alone (`0x76bba0`), which is how pfUI hoverbind (and the
+//! Key Bindings window) take a key: they install `OnKeyUp` and never `OnKeyDown`.
 
 use mlua::Lua;
 
@@ -79,6 +80,9 @@ fn walk(lua: &Lua, channel: Channel, arg: &str) -> bool {
                 Channel::KeyDown => super::editbox::key_input(lua, arg),
             };
             if consumed {
+                if channel == Channel::KeyDown {
+                    remember_key_down(lua, arg, h);
+                }
                 return true;
             }
             continue;
@@ -101,10 +105,12 @@ fn walk(lua: &Lua, channel: Channel, arg: &str) -> bool {
                     return true;
                 }
             }
-            // `0x76b7d0`: either key slot consumes, only `OnKeyDown` fires.
+            // `0x76b7d0`: either key slot consumes, only `OnKeyDown` fires; the consumer is the
+            // sticky target the matching key-up delivers `OnKeyUp` to (`0x76bba0`).
             Channel::KeyDown => {
                 let down = has_script(lua, id, "OnKeyDown");
                 if down || has_script(lua, id, "OnKeyUp") {
+                    remember_key_down(lua, arg, h);
                     if down {
                         fire(lua, id, "OnKeyDown", arg);
                     }
@@ -172,11 +178,60 @@ pub(super) fn frame_key_input(lua: &Lua, key: &str) -> bool {
         };
         let down = has_script(lua, id, "OnKeyDown");
         if down || has_script(lua, id, "OnKeyUp") {
+            remember_key_down(lua, key, h);
             if down {
                 fire(lua, id, "OnKeyDown", key);
             }
             return true;
         }
+    }
+    false
+}
+
+/// The last frame that consumed this key's down, the reference's `[root+code*4+0x84]`.
+fn remember_key_down(lua: &Lua, key: &str, h: FrameHandle) {
+    lua.app_data_mut::<Model>()
+        .expect("model app_data")
+        .key_down_on
+        .insert(key.to_string(), h);
+}
+
+/// Latch the focused EditBox as this key's sticky target when the box consumed through the
+/// fallback routing rather than the walk.
+pub(super) fn latch_focused_key_down(lua: &Lua, key: &str) {
+    let h = {
+        let model = lua.app_data_ref::<Model>().expect("model app_data");
+        model.focused_editbox
+    };
+    if let Some(h) = h {
+        remember_key_down(lua, key, h);
+    }
+}
+
+/// The key-up gate (`0x76bba0`): `OnKeyUp` on the sticky consumer of this code's down, if that
+/// frame is still keyboard-enabled and visible. A missing or dead target is a no-op.
+pub(super) fn key_up_input(lua: &Lua, key: &str) -> bool {
+    let h = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        model.key_down_on.remove(key)
+    };
+    let Some(h) = h else {
+        return false;
+    };
+    let id = {
+        let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+        let live = model
+            .arena
+            .frame(h)
+            .is_some_and(|f| f.effective_visible && f.keyboard_enabled);
+        if !live {
+            return false;
+        }
+        model.frame_id(h)
+    };
+    if has_script(lua, id, "OnKeyUp") {
+        fire(lua, id, "OnKeyUp", key);
+        return true;
     }
     false
 }

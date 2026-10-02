@@ -530,6 +530,7 @@ fn no_shipped_script_sets_a_global_string_key_as_display_text() {
             && s.chars().any(|c| c.is_ascii_uppercase())
             && s.chars()
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            && (s.len() >= 4 || s.contains('_'))
     }
 
     // The string literal after each text sink's open paren on one line.

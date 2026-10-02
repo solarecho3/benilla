@@ -55,6 +55,15 @@ impl HeldUnits<'_> {
             self.reputations,
             self.self_store,
         );
+        // `CanAssist` (`0x6066f0`); `UnitCanAssist` is pfUI libpredict's CastSpell gate.
+        // Owner lookup is the unit's own flags when the owner has not streamed.
+        s.can_assist = crate::target::can_assist(
+            Some(store),
+            self.factions,
+            self.reputations,
+            self.self_store,
+            |_| None,
+        );
         enrich_unit(
             &mut s,
             guid,

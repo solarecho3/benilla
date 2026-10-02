@@ -56,6 +56,24 @@ in a fork, and forks are welcome. GitHub lists
 
 Not planned: other expansions or client versions, Warden (anticheat).
 
+## SolarCraft fork
+
+This tree is [solarecho3/benilla](https://github.com/solarecho3/benilla), the SolarCraft client:
+Hor+ widescreen benilla against a local 1.12 realm. Tagged builds of this fork are on this repo's
+[Releases](https://github.com/solarecho3/benilla/releases) page. Upstream development stays at
+[samwhosung/benilla](https://github.com/samwhosung/benilla).
+
+On Windows, from this checkout:
+
+```powershell
+.\play-solarcraft.ps1
+```
+
+That starts the SolarCraft realm, waits for auth (`3724`) and world (`8085`), then runs a release
+build at native desktop size. Hor+ is the default FOV (`WOW_FOV=reference` restores 1.12's
+shrinking vertical field). Game data stays in your 1.12.1 install; this repo does not ship MPQs,
+WTF, or addons.
+
 ## Running it
 
 benilla builds and runs on macOS, Linux and Windows. You need:

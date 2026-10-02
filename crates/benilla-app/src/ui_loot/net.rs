@@ -5,7 +5,7 @@ use benilla_protocol::messages::{ItemPushResult, LootItem};
 use benilla_protocol::{SessionEvent, SessionEventKind};
 use bevy::prelude::*;
 
-use super::{LootLatch, LootState};
+use super::{close_interaction, LootLatch, LootState};
 use crate::net::{ClientCommand, NetCommands, NetHandlerApp, SelfGuid};
 use crate::pending_item_ops::{LockTransitions, PendingItemOps};
 use crate::ui_action::{UiError, UiErrorKeys};
@@ -149,10 +149,15 @@ fn on_session_end(
 const SERVER_STARTED_LOOT: [u8; 3] = [2, 3, 4];
 
 /// `SMSG_LOOT_RESPONSE`'s item shape, behind the admission gate `0x5eb924`: it opens when the
-/// latch holds the packet's guid, or when the latch is cold and the type is server-started.
-/// Anything else is refused (`0x5eb963`): no window, a `CMSG_LOOT_RELEASE` for the packet's guid,
-/// and the latch cleared whatever it held. An open writes the latch (`0x5ebb60`) and plays no
-/// anim; a chest already knelt at its `SMSG_SPELL_GO` (`0x6e831b`).
+/// latch holds the packet's guid, or when the type is server-started (pickpocketing / fishing /
+/// disenchant, which CMaNGOS also uses for mining and herb chests). Anything else is refused
+/// (`0x5eb963`): no window, a `CMSG_LOOT_RELEASE` for the packet's guid, and the latch cleared
+/// whatever it held. An open writes the latch (`0x5ebb60`) and plays no anim; a chest already
+/// knelt at its `SMSG_SPELL_GO` (`0x6e831b`).
+///
+/// Deviation: a server-started type is admitted even when the latch names a different guid.
+/// Mining's `SPELL_GO` can land after `SMSG_LOOT_RESPONSE`, and a leftover latch from the
+/// previous node then bounced every other vein (release of the NEW guid, blank window).
 fn loot_response(
     guid: u64,
     loot_type: u8,
@@ -162,10 +167,9 @@ fn loot_response(
     latch: &mut LootLatch,
     net: &NetCommands,
 ) {
-    let accept = match latch.0 {
-        Some(latched) => latched == guid,
-        None => SERVER_STARTED_LOOT.contains(&loot_type),
-    };
+    let matching = latch.0 == Some(guid);
+    let server_started = SERVER_STARTED_LOOT.contains(&loot_type);
+    let accept = matching || server_started;
     if !accept {
         // Inert against vmangos: a corpse always pre-arms, a chest or fishing answer is 2 or 3.
         debug!(
@@ -177,6 +181,12 @@ fn loot_response(
         }
         latch.0 = None; // not guid-matched: `0x5eb9d2` clears whatever was there
         return;
+    }
+    if !matching {
+        if loot.source().is_some() {
+            let _ = close_interaction(loot, latch, Some(net));
+        }
+        latch.0 = None;
     }
     debug!(
         "net: loot response {guid:#x} type {loot_type} gold {gold} {} item(s)",
@@ -528,6 +538,43 @@ mod tests {
 
         loot_release_response(CHEST, &mut loot, &mut latch, no_item!());
         assert_eq!(latch.0, None, "the release ends the session");
+    }
+
+    /// A second chest guid: mining the next vein while the previous node's latch is still live.
+    const CHEST_B: u64 = 0xF110_0000_0000_5678;
+
+    /// Mining remaps to type 2. A leftover latch from vein A used to bounce vein B (release of
+    /// B, blank window) and only the following node would open. Server-started types replace.
+    #[test]
+    fn a_server_started_loot_replaces_a_stale_latch() {
+        let (net, rx) = net();
+        let mut loot = LootState::default();
+        let mut latch = LootLatch(Some(CHEST));
+
+        loot_response(CHEST_B, 2, 0, Vec::new(), &mut loot, &mut latch, &net);
+        assert_eq!(latch.0, Some(CHEST_B), "the new vein is the loot session");
+        assert_eq!(loot.source(), Some(CHEST_B), "…and its window opened");
+        assert!(
+            rx.try_recv().is_err(),
+            "no window was open on A, so nothing to release"
+        );
+    }
+
+    /// An open window on A is released so the server does not leave that chest in-use.
+    #[test]
+    fn a_server_started_loot_releases_the_open_window_it_replaces() {
+        let (net, rx) = net();
+        let mut loot = LootState::default();
+        let mut latch = LootLatch(Some(CHEST));
+        loot.open(CHEST, 2, 0, Vec::new());
+
+        loot_response(CHEST_B, 2, 12, Vec::new(), &mut loot, &mut latch, &net);
+        assert_eq!(loot.source(), Some(CHEST_B));
+        assert_eq!(latch.0, Some(CHEST_B));
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::LootRelease { guid }) if guid == CHEST),
+            "the stale chest is released, not the new one"
+        );
     }
 
     /// The `CMSG_LOOT` send armed the same guid: the match branch (`0x5eb93e`).

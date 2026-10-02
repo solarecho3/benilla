@@ -816,13 +816,14 @@ pub(super) fn children_named_any<'a>(
         .filter(move |c| tags.iter().any(|t| c.tag.eq_ignore_ascii_case(t)))
 }
 
-/// Whether a `text=` value is shaped like a GlobalStrings key: `SCREAMING_SNAKE` with a letter, two
-/// characters or more (a one-character `text="X"` is a glyph).
+/// Whether a `text=` value is shaped like a GlobalStrings key: `SCREAMING_SNAKE` with a letter.
+/// Short all-caps labels (`OK`, `WIM`) are display text; a real key is four letters or has `_`.
 fn is_global_string_key(s: &str) -> bool {
     s.len() >= 2
         && s.chars().any(|c| c.is_ascii_uppercase())
         && s.chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && (s.len() >= 4 || s.contains('_'))
 }
 
 /// An `x`/`y` pair from a `<Size>`/`<Offset>`: its `<AbsDimension>` child, else its own attributes.

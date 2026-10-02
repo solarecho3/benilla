@@ -805,6 +805,10 @@ pub const CVAR_SMALL_CULL: &str = "SmallCull";
 /// `SetWorldDetail`'s `frillDensity` per stop, the three dwords at `0x804518`.
 pub const WORLD_DETAIL_STOPS: [u32; 3] = [16, 32, 48];
 
+/// pfUI `hdgraphic` raises Environment Detail to this stop. `SetWorldDetail` still validates
+/// 0..=2 (the reference's range); the Graphics row writes [`CVAR_WORLD_DETAIL`] through 15.
+pub const WORLD_DETAIL_MAX_STOP: i64 = 15;
+
 /// `SetWorldDetail`'s `smallCull` per stop, the three f32s at `0x804524`.
 const SMALL_CULL_STOPS: [f32; 3] = [0.07, 0.04, 0.01];
 
@@ -875,9 +879,11 @@ fn install_world_detail_verbs(lua: &Lua) -> mlua::Result<()> {
                 .cvars
                 .get(&CVAR_WORLD_DETAIL.to_ascii_lowercase())
                 .and_then(|slot| slot.value.parse::<f64>().ok())
-                // The reference only answers 0, 1 or 2, so an off-grid stop (a console
-                // `frillDensity 200` moves it) reports the nearest.
-                .map_or(0, |v| v.round().clamp(0.0, 2.0) as i64);
+                // 1.12 only answers 0, 1 or 2. A `frillDensity` past 48 (pfUI `hdgraphic`, or
+                // the Graphics row at 3..=15) stores the extended stop on [`CVAR_WORLD_DETAIL`].
+                .map_or(0, |v| {
+                    v.round().clamp(0.0, WORLD_DETAIL_MAX_STOP as f64) as i64
+                });
             Ok(stop)
         })?,
     )?;

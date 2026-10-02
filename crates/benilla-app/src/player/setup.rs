@@ -5,12 +5,12 @@ use bevy::camera::{CameraOutputMode, PerspectiveProjection, Projection};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::view::Hdr;
+use bevy::window::PrimaryWindow;
 
 use benilla_assets::coords::wow_to_bevy;
-
 use benilla_assets::{RenderConfig, WorldAssets};
 use benilla_world::terrain_stream::SPAWN_XY;
-use benilla_world::view::{WorldCamera, CAM_FAR, CAM_FOVY, NEARCLIP_DEFAULT};
+use benilla_world::view::{aspect_or_16x9, cam_fovy, WorldCamera, CAM_FAR, NEARCLIP_DEFAULT};
 
 use super::{
     CameraControl, FlyCam, MoveSpeed, Player, PlayerCapsule, CAM_DIST_DEFAULT, CAPSULE_HEIGHT,
@@ -57,6 +57,7 @@ pub(super) fn setup_player(
     world_assets: Option<Res<WorldAssets>>,
     // `gxMultisample` with `config.toml` folded in: this runs after [`crate::cvars::CvarLoad`].
     msaa: Res<benilla_world::view::MsaaSetting>,
+    windows: Query<&Window, With<PrimaryWindow>>,
 ) {
     let env_speed = std::env::var("WOW_MOVE_SPEED")
         .ok()
@@ -90,6 +91,11 @@ pub(super) fn setup_player(
     // detailed world ends at `farclip`, by the wall.
     let spawn = wow_to_bevy([SPAWN_XY.0, SPAWN_XY.1, 100.0]);
     let cam_far = CAM_FAR;
+    let aspect = windows
+        .single()
+        .ok()
+        .map(|w| aspect_or_16x9(w.width(), w.height()))
+        .unwrap_or(16.0 / 9.0);
     let mut world_cam = commands.spawn((
         Camera3d::default(),
         // The portrait booths are `Camera3d`s too: viewer queries filter on this marker.
@@ -102,7 +108,8 @@ pub(super) fn setup_player(
             // Frame zero only: `view::stamp_near_clip` re-stamps the live `nearclip` every frame,
             // as `0x511bc0` overwrites the reference camera's `[cam+0x38]`.
             near: NEARCLIP_DEFAULT,
-            fov: CAM_FOVY,
+            // `scoped_view::stamp_world_fovy` re-stamps from the live window each frame.
+            fov: cam_fovy(aspect),
             ..default()
         }),
         // A linear `Rgba16Float` target without tonemapping: the shaders light in clamped gamma

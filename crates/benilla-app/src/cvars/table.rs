@@ -192,6 +192,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // gives it a checkbox.
     same("useUiScale", "0"),
     same("farclip", "350"),
+    // The options row's max is [`benilla_world::view::FARCLIP_MAX`] (1257), past the 1.12
+    // validate callback's 777; the registered default stays the reference's 350.
     // `nearclip` (`0x68867a`: name `0x84ffb0`, default `0x84fb48` "0.1", flags 1, callback
     // `0x688d90`, record `[0xc7f348]`). The camera re-reads the record every frame: `0x511bc0`
     // (sole caller `0x483094`) stamps `[cam+0x38]` from it through the handle `[0xbe1078]` that
@@ -298,9 +300,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // rank prefix.
     same("UnitNamePlayerGuild", "1"),
     // `WorldDetail` is no 1.12 CVar but the `GetWorldDetail`/`SetWorldDetail` verb name
-    // (`OptionsFrame.lua:27`); stops 0/1/2 are `frillDensity` 16/32/48. `SetWorldDetail 0x488dd0`
-    // also writes `SmallCull` {0.07, 0.04, 0.01}, and `GetWorldDetail` reads only `SmallCull`,
-    // whose registered 0.04 is stop 1: the reference's slider boots at Medium.
+    // (`OptionsFrame.lua:27`); stops 0/1/2 are `frillDensity` 16/32/48, and 3..=15 follow pfUI
+    // `hdgraphic` (`(n+1)*16` cells, fade horizon past 70 yd). `SetWorldDetail 0x488dd0` also
+    // writes `SmallCull` {0.07, 0.04, 0.01} for 0..=2, and `GetWorldDetail` reads the stop
+    // (1.12 reads only `SmallCull`). Registered 0.04 is stop 1: the slider boots at Medium.
     same("WorldDetail", "1"),
     // `SmallCull` (`0x68854a`: name `0x8696f8`, default `0x869718` "0.04", flags 1, callback
     // `0x688b10`, record `[0xc7f330]`). The callback refuses outside [0.001, 2.0] and stores into

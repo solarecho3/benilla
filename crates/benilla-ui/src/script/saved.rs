@@ -97,9 +97,16 @@ fn serialize(v: &Value, depth: usize, seen: &mut HashSet<*const c_void>) -> Opti
         Value::String(s) => Some(quote(&s.as_bytes())),
         Value::Table(t) => table(t, depth, seen),
         // Functions, threads and userdata have no literal; a frame's `[0]` handle is a
-        // lightuserdata (`0x701bd0`).
+        // lightuserdata (`0x701bd0`). A widget wrapper is skipped in [`table`], not here.
         _ => None,
     }
+}
+
+/// A frame or region wrapper: `T[0]` is the identity lightuserdata (`0x701bd0`). The reference
+/// cannot persist that handle, so a saved table that holds `DEFAULT_CHAT_FRAME` must drop the
+/// entry rather than dump the wrapper's string keys as a fake property bag.
+fn is_widget_wrapper(t: &Table) -> bool {
+    matches!(t.raw_get::<Value>(0), Ok(Value::LightUserData(_)))
 }
 
 /// A Lua number literal: integral values bare, as the reference's `%.16g` prints them, others in
@@ -138,6 +145,9 @@ fn quote(s: &[u8]) -> Vec<u8> {
 /// strings. It reloads a list as a list through the 1.12 parser: `recfield` gives a `[k] = v` field
 /// no size hint, so dense integer keys land in the array part, which `next` walks in order.
 fn table(t: &Table, depth: usize, seen: &mut HashSet<*const c_void>) -> Option<Vec<u8>> {
+    if is_widget_wrapper(t) {
+        return None;
+    }
     if depth > MAX_DEPTH || !seen.insert(t.to_pointer()) {
         return None;
     }
@@ -364,5 +374,38 @@ mod tests {
         assert!(fresh
             .eval::<bool>("return KEYS[string.char(200)] == 1 and KEYS[string.char(201)] == 2")
             .unwrap());
+    }
+
+    #[test]
+    fn a_frame_wrapper_is_not_serialized_as_a_property_bag() {
+        let mut s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            f = CreateFrame("Frame", "SaveMe")
+            f.buttonSide = "left"
+            BAG = { window = f, n = 1 }
+            RegisterForSave("BAG")
+            RegisterForSave("SaveMe")
+        "#,
+        )
+        .unwrap();
+        let text = String::from_utf8(s.saved_variables_bytes()).expect("utf-8");
+        assert!(
+            text.contains("[\"n\"] = 1"),
+            "plain fields of the parent table still write:\n{text}"
+        );
+        assert!(
+            !text.contains("buttonSide"),
+            "the wrapper's Lua fields must not become a fake frame:\n{text}"
+        );
+        assert!(
+            !text.contains("SaveMe ="),
+            "a top-level frame global is unserializable:\n{text}"
+        );
+        let warns = s.take_warnings();
+        assert!(
+            warns.iter().any(|w| w.contains("SaveMe")),
+            "the skipped frame is named in the warning: {warns:?}"
+        );
     }
 }

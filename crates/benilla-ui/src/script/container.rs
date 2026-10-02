@@ -31,7 +31,9 @@ pub struct ContainerSlot {
     pub quality: Option<u32>,
     /// The item's template entry; 0 while unresolved.
     pub item_id: u32,
-    /// An `|Hitem:…|h[Name]|h` link once the name is known.
+    /// An `|Hitem:…|h[Name]|h` link once the name is known. Occupied slots with an
+    /// `item_id` still get a stub link so `GetContainerItemLink` is not nil while
+    /// `GetContainerItemInfo` reports a count (pfUI `GetItemCount` strfinds the link).
     pub link: Option<String>,
     pub locked: bool,
     /// The 1-based inventory slots the item equips into, from `inventoryType`; empty if none.
@@ -522,11 +524,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
             let link = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model
-                    .containers
-                    .get(&bag)
-                    .and_then(|c| c.slots.get(&slot))
-                    .and_then(|s| s.link.clone())
+                model.containers.get(&bag).and_then(|c| c.slots.get(&slot)).and_then(
+                    |s| {
+                        s.link.clone().or_else(|| {
+                            // Template still in flight: the slot is occupied (`itemCount`
+                            // truthy, including Lua's 0) so addons that strfind the link
+                            // must not see nil. The id is enough for `(%d+):`.
+                            (s.item_id != 0).then(|| {
+                                format!("|cffffffff|Hitem:{}:0:0:0|h[]|h|r", s.item_id)
+                            })
+                        })
+                    },
+                )
             };
             match link {
                 Some(l) => Ok(Value::String(lua.create_string(&l)?)),
@@ -848,12 +857,39 @@ mod tests {
                  return texture == nil and quality == nil and itemCount ~= nil",
             )
             .unwrap());
+        // No item_id yet: the link stays nil. Occupied slots with an id (the letter in 4)
+        // still answer a stub so pfUI GetItemCount's strfind does not raise.
         assert!(s
             .eval::<bool>("return GetContainerItemLink(0, 3) == nil")
             .unwrap());
+        assert_eq!(
+            s.eval::<i64>(
+                "local _, _, id = string.find(GetContainerItemLink(0, 4), 'item:(%d+)') \
+                 return tonumber(id)"
+            )
+            .unwrap(),
+            8383
+        );
         assert!(s
             .eval::<bool>("return GetContainerItemInfo(0, 2) == nil")
             .unwrap());
+        // Lua 0 is truthy: a count of 0 with a nil link used to raise in strfind.
+        s.run(
+            r#"
+            for bag = 4, 0, -1 do
+              for slot = 1, GetContainerNumSlots(bag) do
+                local _, itemCount = GetContainerItemInfo(bag, slot)
+                if itemCount then
+                  local itemLink = GetContainerItemLink(bag, slot)
+                  if itemLink then
+                    string.find(itemLink, "(%d+):")
+                  end
+                end
+              end
+            end
+            "#,
+        )
+        .unwrap();
     }
 
     #[test]

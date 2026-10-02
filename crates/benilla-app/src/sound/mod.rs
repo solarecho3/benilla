@@ -131,7 +131,8 @@ pub(crate) struct SoundConfig {
     pub emote_sounds: bool,
     /// `SoundZoneMusicNoDelay` (default "0", `0x4578b3`), the panel's "Loop Music": drops the
     /// `ZoneMusic.dbc` silence interval between plays of one zone's track
-    /// ([`zone::next_track_time`], `0x4601f0`). A zone change is immediate either way.
+    /// ([`zone::next_track_time`], `0x4601f0`). Off still uses a capped rest so a forest kit is
+    /// not quiet for minutes. A zone change is immediate either way.
     pub zone_music_no_delay: bool,
 }
 

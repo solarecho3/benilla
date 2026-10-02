@@ -88,10 +88,18 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
         }
     }
 
+    let atlas_scale = sections
+        .skin_texture(look.race, look.sex, look.skin)
+        .and_then(|p| blp_shape(chain, p))
+        .map(|(w, h, _)| ((w / 256).max(1), (h / 256).max(1)))
+        .unwrap_or((1, 1));
+
     // (1) The plan, in the composite's order; worn garments and the three emblem layers share it.
     println!("\nequipment blits (by ascending cell; later covers earlier within a tile):");
     for step in equip_blits(&equipment, look.emblem, false) {
         let (_x, y, w, h) = equip_tile(step.layer).expect("layer < 8");
+        let (sx, sy) = atlas_scale;
+        let (y, w, h) = (y * sy, w * sx, h * sy);
         let candidates = step.candidates(look.sex);
         let basename = |p: &str| p.rsplit('\\').next().unwrap_or(p).to_string();
         let (who, name) = match step.source {
@@ -178,6 +186,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
         .context("no base skin row for this appearance")?;
 
     let stride = dressed.width as usize;
+    let (sx, sy) = ((dressed.width / 256).max(1), (dressed.height / 256).max(1));
     println!(
         "\natlas {}x{} ({} mips) — rows repainted vs naked, per tile:",
         dressed.width,
@@ -185,6 +194,7 @@ pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) 
         dressed.mips.len()
     );
     for (name, x, y, tw, th) in TILES {
+        let (x, y, tw, th) = (x * sx, y * sy, tw * sx, th * sy);
         let painted: Vec<u32> = (0..th)
             .map(|r| {
                 (0..tw)

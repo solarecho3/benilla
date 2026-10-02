@@ -759,6 +759,22 @@ fn set_font_is_one_routine_on_both_tables() {
             .unwrap(),
             "{obj}:SetFont must accept a numeric string height"
         );
+
+        // A boolean flags argument is omitted (`cond and "OUTLINE"` is false when off).
+        assert!(
+            s.eval::<bool>(&format!(
+                "return {obj}:SetFont('Fonts\\\\FRIZQT__.TTF', 12, false) == 1"
+            ))
+            .unwrap(),
+            "{obj}:SetFont must omit a boolean flags argument rather than raise"
+        );
+        assert!(
+            s.eval::<bool>(&format!(
+                "local _, _, flags = {obj}:GetFont() return flags == ''"
+            ))
+            .unwrap(),
+            "{obj}:SetFont(false flags) must leave outline unset"
+        );
     }
 }
 

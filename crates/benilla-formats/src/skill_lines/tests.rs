@@ -32,6 +32,20 @@ fn real_skill_line_catalog_resolves_known_spells() {
 
     assert_eq!(cat.spell_to_line(0), None);
 
+    // Spellbook skill-line tabs: Arms/Fury/Protection must resolve a SpellIcon path so pfUI's
+    // Nostalgia skin can paint the tab after StripTextures + SkinButton.
+    for (id, name) in [(26u32, "Arms"), (256, "Fury"), (257, "Protection")] {
+        let line = cat.line(id).unwrap_or_else(|| panic!("{name} ({id})"));
+        assert_eq!(line.name, name);
+        assert!(
+            line.icon
+                .as_deref()
+                .is_some_and(|p| p.starts_with("Interface\\Icons\\")),
+            "{name} ({id}) tab icon missing, got {:?}",
+            line.icon
+        );
+    }
+
     // Column 12: a profession's own flavour sentence, the weapon lines' shared one.
     let smithing = cat.line(164).expect("Blacksmithing resolves");
     assert!(

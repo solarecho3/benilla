@@ -207,6 +207,9 @@ pub(crate) struct Model {
     pub(crate) hover_repick: bool,
     /// Per button, the frame its press landed on, for `OnClick`'s same-frame release test.
     pub(crate) mouse_down_on: HashMap<String, FrameHandle>,
+    /// Per key name, the frame that consumed that code's down (`[root+code*4+0x84]` at `0x765fd0`):
+    /// the matching key-up fires `OnKeyUp` on it (`0x76bba0`).
+    pub(crate) key_down_on: HashMap<String, FrameHandle>,
     /// The client's one mouse-capture slot (`root+0x80`), read by the mouse-down raise. Set at
     /// `0x7663e6` to the capture, else the hovered frame, so a chorded press keeps the capture;
     /// cleared at `0x7664bb` once no button is down. A title-region press captures nothing.
@@ -1094,6 +1097,7 @@ impl Model {
             mouseover: None,
             hover_repick: false,
             mouse_down_on: HashMap::new(),
+            key_down_on: HashMap::new(),
             mouse_capture: None,
             last_click: HashMap::new(),
             pending_size_changed: Vec::new(),

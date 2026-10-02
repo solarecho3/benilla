@@ -7,8 +7,34 @@ use crate::{normalize, yn};
 
 /// Dump an M2's collision hull: counts, model-space AABB (WoW axes, Z up), extents.
 pub fn m2coll(chain: &mut Chain, internal_path: &str) -> Result<()> {
-    let name = normalize(internal_path);
-    let hull = benilla_formats::load_m2_collision_hull(chain, &name)?;
+    let name = {
+        let lower = normalize(internal_path).to_ascii_lowercase();
+        match lower
+            .strip_suffix(".mdx")
+            .or_else(|| lower.strip_suffix(".mdl"))
+        {
+            Some(stem) => format!("{stem}.m2"),
+            None => lower,
+        }
+    };
+    let bytes = chain
+        .read_file(&name)
+        .with_context(|| format!("reading '{name}' from chain"))?;
+    let format = benilla_m2::parse_m2(&mut std::io::Cursor::new(&bytes))
+        .map_err(|e| anyhow::anyhow!("parsing M2: {e}"))?;
+    let h = &format.model().header;
+    let flags = u32::from_le_bytes(bytes.get(16..20).and_then(|s| s.try_into().ok()).unwrap_or([0; 4]));
+    println!(
+        "flags {flags:#010x}  collision_box  x {:>8.3} .. {:>8.3}  y {:>8.3} .. {:>8.3}  z {:>8.3} .. {:>8.3}  sphere {:>7.3}",
+        h.collision_box_min[0],
+        h.collision_box_max[0],
+        h.collision_box_min[1],
+        h.collision_box_max[1],
+        h.collision_box_min[2],
+        h.collision_box_max[2],
+        h.collision_sphere_radius,
+    );
+    let hull = benilla_formats::parse_m2_collision_hull(&bytes)?;
     if hull.is_empty() {
         println!("no collision hull (nBoundingTriangles == 0) — nothing collides with this model");
         return Ok(());
@@ -33,6 +59,24 @@ pub fn m2coll(chain: &mut Chain, internal_path: &str) -> Result<()> {
             max[a],
             max[a] - min[a]
         );
+    }
+    // Walking band: triangles whose centroid sits in the capsule's Z range about the origin.
+    let mut walk_n = 0usize;
+    let mut walk_r = 0.0f32;
+    for t in hull.indices.as_chunks::<3>().0 {
+        let c = [0, 1, 2].map(|k| hull.positions[t[k] as usize]);
+        let z = (c[0][2] + c[1][2] + c[2][2]) / 3.0;
+        if !(-2.0..=4.0).contains(&z) {
+            continue;
+        }
+        walk_n += 1;
+        let x = (c[0][0] + c[1][0] + c[2][0]) / 3.0;
+        let y = (c[0][1] + c[1][1] + c[2][1]) / 3.0;
+        walk_r = walk_r.max((x * x + y * y).sqrt());
+    }
+    println!("walk-height tris (centroid z in -2..4): {walk_n}, max XY radius {walk_r:.3} yd");
+    if hull.clone().without_canopy_volume().is_empty() {
+        println!("walk hull: dropped (canopy volume, both ground extents ≥ 8 yd)");
     }
     Ok(())
 }

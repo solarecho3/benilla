@@ -233,25 +233,32 @@ pub(crate) fn on_cvar(
                 *benilla_assets::ANISO_RANGE.end(),
             )
         }
-        // The panel's 0/1/2 is the density multiplier x1/x2/x3, clamped to the 1.12 slider's
-        // range. `frillDensity` is the same knob, mirrored so `GetCVar` never answers two levels.
+        // Environment Detail: stops 0/1/2 are the 1.12 table (frill 16/32/48, 70 yd fade). Stops
+        // 3..=15 follow pfUI `hdgraphic` (`(n+1)*16` cells, 15 → 256) and stretch the grass
+        // horizon toward 250 yd. The Graphics row writes this CVar, not `SetWorldDetail`.
         "worlddetail" => {
-            clutter.density = v.clamp(0.0, 2.0) + 1.0;
+            clutter.apply_world_detail(v);
+            // Re-assert the stop: a same-batch `frillDensity` observer can have mirrored a
+            // vanilla High over a saved 3..=15 before this arm runs.
+            cvars.mirror(
+                benilla_ui::script::CVAR_WORLD_DETAIL,
+                &(clutter.density - 1.0).to_string(),
+            );
             cvars.mirror(
                 benilla_ui::script::CVAR_FRILL_DENSITY,
                 &clutter.frill_density().to_string(),
             );
             // The stop's other half, as `SetWorldDetail` writes it, so a stop set as a CVar keeps
-            // `SmallCull` in step too.
+            // `SmallCull` in step too. Past High keeps the High cull (nothing reads it).
             cvars.mirror(
                 benilla_ui::script::CVAR_SMALL_CULL,
-                &benilla_ui::script::small_cull_text(v.clamp(0.0, 2.0) as usize),
+                &benilla_ui::script::small_cull_text(v.trunc().clamp(0.0, 2.0) as usize),
             );
         }
         // The same knob in the reference's cells per chunk, clamped to `[1, 256]`
         // (`ClutterConfig::set_frill_density`); the loaded tiles re-scatter off the change.
         "frilldensity" => {
-            clutter.set_frill_density(v);
+            clutter.apply_frill_density(v);
             cvars.mirror(
                 benilla_ui::script::CVAR_WORLD_DETAIL,
                 &(clutter.density - 1.0).to_string(),

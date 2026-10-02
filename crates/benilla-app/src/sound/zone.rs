@@ -4,12 +4,15 @@
 //! (parent-inherited, `AreaSoundCatalog::resolve`) → SoundEntries kits → streamed MP3/WAV.
 //!
 //! Music (`0x460040`–`0x460ca0`): same-zone tracks are spaced by a random per-phase silence
-//! interval (`0x4601f0`). A zone-music change (`0x4602e0`) or world entry (`0x45ffc0`, at
-//! `0x45ffdb`) arms the next start to −1 at `0x836400`, so the incoming track opens that tick
-//! (`0x460240`) at full volume: no fade-in primitive (`0x7a57b0`, `0x7a5730`) is called on a
-//! music slot. A start that plays nothing (no kit, a file missing from the archive, a failed
-//! open) leaves that deadline armed, so every tick retries with a fresh weighted pick
-//! (`0x460240` writes `[0x836400]` on no failure path): a missing file costs a tick, not the zone.
+//! interval (`0x4601f0`). Vanilla `ZoneMusic.dbc` rest can run into minutes (Elwynn 180–300 s);
+//! [`capped_silence`] keeps that gap inside [`ZONE_MUSIC_SILENCE_CAP_MS`] so a zone's kit comes
+//! back within a short rest. `SoundZoneMusicNoDelay` ("Loop Music") still drops the gap entirely.
+//! A zone-music change (`0x4602e0`) or world entry (`0x45ffc0`, at `0x45ffdb`) arms the next start
+//! to −1 at `0x836400`, so the incoming track opens that tick (`0x460240`) at full volume: no
+//! fade-in primitive (`0x7a57b0`, `0x7a5730`) is called on a music slot. A start that plays nothing
+//! (no kit, a file missing from the archive, a failed open) leaves that deadline armed, so every
+//! tick retries with a fresh weighted pick (`0x460240` writes `[0x836400]` on no failure path): a
+//! missing file costs a tick, not the zone.
 //!
 //! Server-pushed music (`SMSG_PLAY_MUSIC`) takes the same slot. The server re-pushes an event
 //! track to loop it (the Darkmoon Faire every 5 s, vmangos `go_scripts.cpp:318`), so a push for
@@ -54,6 +57,13 @@ pub(crate) struct ExplorationSounds(pub(crate) benilla_formats::ExplorationSound
 /// How long after a cinematic ends the zone track comes back: `[0x836400] = tick + 0xbb8` at
 /// `0x4603b0(0)`.
 const CINEMATIC_MUSIC_RESUME_SECS: f64 = 3.0;
+
+/// Upper bound on the same-zone rest after a track, in ms. Vanilla DBC values are authentic and
+/// often minutes long; this cap is the play preference so music returns more often.
+const ZONE_MUSIC_SILENCE_CAP_MS: u32 = 20_000;
+
+/// When a DBC min sits at or above the cap, keep this much rest rather than a zero-width interval.
+const ZONE_MUSIC_SILENCE_FLOOR_MS: u32 = 5_000;
 
 fn phase(clock: &GameClock) -> usize {
     if (330..1260).contains(&clock.minute) {
@@ -226,14 +236,28 @@ impl ZoneAudio {
         self.lua_music_path.is_some()
     }
 
-    /// Uniform silence interval (ms) in `[min, max]` for the phase.
+    /// Uniform silence interval (ms) in `[min, max]` for the phase, after [`capped_silence`].
     fn silence_ms(&mut self, min: u32, max: u32) -> u32 {
+        let (min, max) = capped_silence(min, max);
         if max > min {
             min + self.rand() % (max - min + 1)
         } else {
             min
         }
     }
+}
+
+/// Clamp a `ZoneMusic.dbc` `[min, max]` rest so it never exceeds [`ZONE_MUSIC_SILENCE_CAP_MS`].
+/// Short authentic gaps stay as written; a minutes-long forest rest becomes a 5–20 s pause.
+fn capped_silence(min: u32, max: u32) -> (u32, u32) {
+    let max = max.min(ZONE_MUSIC_SILENCE_CAP_MS);
+    let min = min.min(max);
+    let min = if min == ZONE_MUSIC_SILENCE_CAP_MS {
+        ZONE_MUSIC_SILENCE_FLOOR_MS.min(max)
+    } else {
+        min
+    };
+    (min, max)
 }
 
 /// Startup: load the zone-audio and exploration-sound catalogs.
@@ -462,10 +486,10 @@ fn zone_music_row(cat: &AreaSoundCatalog, _id: u32) -> Option<&benilla_formats::
 }
 
 /// When the next track starts after this one ends, the reference's `0x4601f0` (called only from
-/// the natural-end reap `0x4600b6`): `now` plus the row's random per-phase silence interval, or
-/// `now` under `SoundZoneMusicNoDelay` (`0x42c010`). That CVar removes only the same-zone gap; a
-/// zone change is immediate either way (`0x460346`). Its `== 0 → now + 6000 ms` arm is not a cold
-/// start: world entry never reaches this function.
+/// the natural-end reap `0x4600b6`): `now` plus the row's random per-phase silence interval (capped
+/// by [`capped_silence`]), or `now` under `SoundZoneMusicNoDelay` (`0x42c010`). That CVar removes
+/// only the same-zone gap; a zone change is immediate either way (`0x460346`). Its
+/// `== 0 → now + 6000 ms` arm is not a cold start: world entry never reaches this function.
 fn next_track_time(
     zone: &mut ZoneAudio,
     cat: &AreaSoundCatalog,
@@ -1122,10 +1146,11 @@ pub(super) fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_music_suppression, begin_bed_open, begin_zone_music, first_unplayable, forced_bed,
-        open_bed, poll_bed_open, pump_zone_music, reap_stopped_bed, slot_holds, start_bed,
-        stop_world_soundscape, take_lua_music_slot, OpenedBed, ZoneAudio,
-        CINEMATIC_MUSIC_RESUME_SECS, LUA_MUSIC_SCHEDULE_SECS,
+        apply_music_suppression, begin_bed_open, begin_zone_music, capped_silence,
+        first_unplayable, forced_bed, open_bed, poll_bed_open, pump_zone_music, reap_stopped_bed,
+        slot_holds, start_bed, stop_world_soundscape, take_lua_music_slot, OpenedBed, ZoneAudio,
+        CINEMATIC_MUSIC_RESUME_SECS, LUA_MUSIC_SCHEDULE_SECS, ZONE_MUSIC_SILENCE_CAP_MS,
+        ZONE_MUSIC_SILENCE_FLOOR_MS,
     };
     use crate::sound::kit::SoundKits;
     use crate::sound::mixer;
@@ -1165,6 +1190,31 @@ mod tests {
                 pump_zone_music(zone, Some(7), |z, k| kit.start(z, k));
             }
         }
+    }
+
+    /// Elwynn's Zone-Forest rest (180–300 s) compresses to the 5–20 s play window.
+    #[test]
+    fn a_minutes_long_dbc_rest_is_capped_to_the_play_window() {
+        assert_eq!(
+            capped_silence(180_000, 300_000),
+            (ZONE_MUSIC_SILENCE_FLOOR_MS, ZONE_MUSIC_SILENCE_CAP_MS)
+        );
+        assert_eq!(
+            capped_silence(200_000, 200_000),
+            (ZONE_MUSIC_SILENCE_FLOOR_MS, ZONE_MUSIC_SILENCE_CAP_MS)
+        );
+    }
+
+    /// A rest already inside the cap is left as the DBC wrote it, including a zero-width one.
+    #[test]
+    fn a_short_dbc_rest_is_left_alone() {
+        assert_eq!(capped_silence(0, 0), (0, 0));
+        assert_eq!(capped_silence(8_000, 15_000), (8_000, 15_000));
+        assert_eq!(capped_silence(0, 30_000), (0, ZONE_MUSIC_SILENCE_CAP_MS));
+        assert_eq!(
+            capped_silence(15_000, 20_000),
+            (15_000, ZONE_MUSIC_SILENCE_CAP_MS)
+        );
     }
 
     /// The Crossroads' shape: four tracks, one in the install.

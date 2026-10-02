@@ -204,17 +204,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetStatusBarColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
-                let (r, g, b) = (
-                    crate::script::object::as_f32(&r),
-                    crate::script::object::as_f32(&g),
-                    crate::script::object::as_f32(&b),
-                );
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let color = crate::script::object::color_rgba(&r, &g, &b, &a, 1.0);
                 let id = ensure_bar(lua, &this, None)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model app_data");
                 let rh = *model.id_to_region.get(&id).expect("bar region id");
-                model.region_data.entry(rh).or_default().vertex_color =
-                    Some([r, g, b, a.unwrap_or(1.0)]);
+                model.region_data.entry(rh).or_default().vertex_color = Some(color);
                 Ok(())
             },
         )?,

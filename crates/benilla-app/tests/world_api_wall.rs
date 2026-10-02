@@ -157,6 +157,8 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("thread_qos::QosClass", "record"),
     ("thread_qos::ThreadQosPlugin", "wall"),
     ("thread_qos::promote_current_thread", "record"),
+    ("view::aspect_or_16x9", "record"),
+    ("view::cam_fovy", "record"),
     ("view::MsaaFormats", "record"),
     ("view::MsaaSetting", "record"),
     ("view::ViewDistance", "record"),
@@ -274,7 +276,6 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
     ),
     ("terrain_stream::point_light", "CLOSE/absorb"),
     ("terrain_stream::spawn_model_entities", "CLOSE/move-engine"),
-    ("view::CAM_FOVY", "CLOSE/absorb"),
     ("view::FARCLIP_RANGE", "CLOSE/absorb"),
     ("view::NEARCLIP_DEFAULT", "CLOSE/absorb"),
     ("wmo_portal::UnitWmoRoom", "CLOSE/absorb"),
@@ -283,7 +284,7 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
 ];
 
 /// The gate on the leak count. Lower it when a leak closes.
-const LEAK_CEILING: usize = 107;
+const LEAK_CEILING: usize = 106;
 
 /// How far under [`LEAK_CEILING`] the count may sit before the test asks for the ceiling to be
 /// lowered: one closure does not fail the gate, a whole stage of work cannot go unrecorded.

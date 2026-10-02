@@ -630,6 +630,14 @@ fn load_config(world: &mut World) {
         }
         cvars.take_events()
     };
+    trigger_load_events(world, events);
+}
+
+/// Fire config-load observers. `WorldDetail` last: a saved stop 3..=15 must not be overwritten
+/// by a companion `frillDensity` 48 (ASCII puts `WorldDetail` before `frillDensity`, and the
+/// Graphics row writes the stop while an older build mirrored vanilla High onto `frillDensity`).
+fn trigger_load_events(world: &mut World, mut events: Vec<CvarChanged>) {
+    events.sort_by_key(|ev| ev.is("WorldDetail") as u8);
     for event in events {
         world.trigger(event);
     }
@@ -1195,6 +1203,8 @@ mod tests {
         assert_eq!(res::<SoundConfig>(&app).master, 1.0);
         apply(&mut app, "farclip", "50");
         assert_eq!(res::<ViewDistance>(&app).farclip, *FARCLIP_RANGE.start());
+        apply(&mut app, "farclip", "9000");
+        assert_eq!(res::<ViewDistance>(&app).farclip, *FARCLIP_RANGE.end());
         // `nearclip` clamps to the callback's `[0.01, 0.33]` (`0x688d90`).
         apply(&mut app, "nearclip", "0.001");
         assert_eq!(
@@ -1328,11 +1338,28 @@ mod tests {
         assert!(!res::<BubbleConfig>(&app).all);
         apply(&mut app, "chatbubblesparty", "0");
         assert!(!res::<BubbleConfig>(&app).party);
-        // WorldDetail: stop 0/1/2 is density ×1/×2/×3, clamped to the slider's range.
+        // WorldDetail: stop 0/1/2 is density ×1/×2/×3; 3..=15 follow pfUI hdgraphic
+        // (`(n+1)*16` cells) and stretch the grass horizon.
         apply(&mut app, "WorldDetail", "0");
         assert_eq!(res::<ClutterConfig>(&app).density, 1.0);
+        assert_eq!(
+            res::<ClutterConfig>(&app).fade_far,
+            benilla_world::clutter::DETAIL_DOODAD_FADE_FAR
+        );
         apply(&mut app, "worlddetail", "7");
+        assert_eq!(res::<ClutterConfig>(&app).density, 8.0);
+        apply(&mut app, "WorldDetail", "15");
+        assert_eq!(res::<ClutterConfig>(&app).density, 16.0);
+        assert_eq!(
+            res::<ClutterConfig>(&app).fade_far,
+            benilla_world::clutter::DETAIL_DOODAD_FADE_FAR_ULTRA
+        );
+        apply(&mut app, "WorldDetail", "2");
         assert_eq!(res::<ClutterConfig>(&app).density, 3.0);
+        assert_eq!(
+            res::<ClutterConfig>(&app).fade_far,
+            benilla_world::clutter::DETAIL_DOODAD_FADE_FAR
+        );
         // `frillDensity` is the same field in cells per chunk, with its own clamp `[1, 256]`
         // (`0x688de0`); the stops round-trip through both spellings.
         apply(&mut app, "frillDensity", "48");
@@ -1521,6 +1548,30 @@ mod tests {
             Vec::<String>::new(),
             "a callback that prints nothing adds nothing"
         );
+    }
+
+    #[test]
+    fn a_saved_ultra_world_detail_wins_over_a_vanilla_frill_in_the_same_file() {
+        let mut app = cvar_app();
+        let events = {
+            let mut cvars = app.world_mut().resource_mut::<Cvars>();
+            cvars.load_file(
+                [
+                    ("WorldDetail".to_string(), "15".to_string()),
+                    ("frillDensity".to_string(), "48".to_string()),
+                ]
+                .into(),
+            );
+            cvars.take_events()
+        };
+        super::trigger_load_events(app.world_mut(), events);
+        assert_eq!(res::<ClutterConfig>(&app).density, 16.0);
+        assert_eq!(
+            res::<ClutterConfig>(&app).fade_far,
+            benilla_world::clutter::DETAIL_DOODAD_FADE_FAR_ULTRA
+        );
+        assert_eq!(res::<Cvars>(&app).get("WorldDetail"), Some("15"));
+        assert_eq!(res::<Cvars>(&app).get("frillDensity"), Some("256"));
     }
 
     #[test]

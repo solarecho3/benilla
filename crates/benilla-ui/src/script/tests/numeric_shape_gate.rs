@@ -66,4 +66,45 @@ fn every_shape_c_colour_position_takes_nil_as_zero_and_never_raises() {
     // `FontString:SetTextColor 0x79d9c0`.
     s.run("FS:SetTextColor(nil, nil, nil)")
         .expect("FontString:SetTextColor is shape C on r/g/b");
+
+    // Numeric strings are `lua_tonumber`, so pfUI's `strsplit` colour `"1,1,0,1"` paints yellow
+    // rather than black. A non-numeric string stays 0 (`SetVertexColor({}, "abc", true)` above).
+    s.run(r#"FS:SetTextColor("1", "1", "0", "1")"#)
+        .expect("SetTextColor accepts numeric strings");
+    s.run(
+        r#"
+        local r, g, b, a = FS:GetTextColor()
+        assert(r == 1 and g == 1 and b == 0 and a == 1, "numeric strings store the channels")
+        "#,
+    )
+    .unwrap();
+    s.run(r#"T:SetVertexColor(".2", "1", ".8")"#).unwrap();
+    s.run(
+        r#"
+        local r, g, b = T:GetVertexColor()
+        assert(math.abs(r - 0.2) < 1e-5 and g == 1 and math.abs(b - 0.8) < 1e-5)
+        "#,
+    )
+    .unwrap();
+    // pfUI action-bar tints pass four strsplit strings, including alpha.
+    s.run(r#"T:SetVertexColor(".3", ".3", ".3", "1")"#)
+        .expect("SetVertexColor accepts a numeric-string alpha");
+    s.run(
+        r#"
+        local r, g, b, a = T:GetVertexColor()
+        assert(math.abs(r - 0.3) < 1e-5 and math.abs(a - 1) < 1e-5, "naColor strings store grey")
+        "#,
+    )
+    .unwrap();
+    s.run(r#"T:SetVertexColor("1", "0.1", "0.1", "junk")"#)
+        .unwrap();
+    s.run(
+        r#"
+        local _, _, _, a = T:GetVertexColor()
+        assert(math.abs(a - 1) < 1e-5, "a non-numeric alpha keeps the shape-B default 1")
+        "#,
+    )
+    .unwrap();
+    s.run(r#"T:SetTexture("1", "0", "0", "1")"#)
+        .expect("SetTexture colour form accepts numeric strings");
 }

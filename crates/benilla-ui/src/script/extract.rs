@@ -334,15 +334,39 @@ impl UiScript {
                         }
                     } else {
                         // The draw gate is the texture slot, never the colour (`0x7706e0`: empty
-                        // `+0xcc` emits nothing); a vertex colour alone is a tint. A gradient fills
-                        // the texture slot, so it draws, at its midpoint since a quad has one tint.
-                        let fill = data.fill.or_else(|| data.gradient.map(|g| g.midpoint()));
+                        // `+0xcc` emits nothing); a vertex colour alone is a tint. `SetGradient`
+                        // writes the four corner colours (`+0xb8`), so a solid fill (the AFK
+                        // letterbox's white 8×8) is the texel, not a replacement for the fade.
+                        let vertex = data.gradient.map(|g| g.midpoint()).or(data.vertex_color);
                         let has_path = data.texture.is_some();
-                        let has_texture = has_path || fill.is_some();
+                        let has_texture =
+                            has_path || data.fill.is_some() || data.gradient.is_some();
+                        // One tint per quad: a file-less two-stop is sliced along the axis so
+                        // pfUI's AFK `SetTexture(1,1,1,1)` + `SetGradientAlpha` letterbox fades
+                        // instead of painting a solid white bar. A file keeps the midpoint tint.
+                        if let (Some(g), None, Some(r)) =
+                            (data.gradient, data.texture.as_ref(), rect)
+                        {
+                            let scale = owner_frame.map(|f| f.effective_scale).unwrap_or(1.0);
+                            out.extend(gradient_strip_quads(
+                                g,
+                                data.fill,
+                                data.blend == crate::script::BlendMode::Add,
+                                data.circular,
+                                data.rotation,
+                                r,
+                                alpha,
+                                clip,
+                                scale,
+                                target,
+                                zkey.raw(),
+                            ));
+                            continue;
+                        }
                         QuadContent::Texture {
                             path: data.texture,
                             color: has_texture
-                                .then(|| texture_color(fill, data.vertex_color))
+                                .then(|| texture_color(data.fill, vertex))
                                 .flatten(),
                             // The renderer acts on ADD only: the other four `alphaMode` values
                             // answer `GetBlendMode` but draw as straight alpha.
@@ -412,6 +436,76 @@ fn texture_color(fill: Option<[f32; 4]>, vertex: Option<[f32; 4]>) -> Option<[f3
         (Some(c), None) | (None, Some(c)) => Some(c),
         (None, None) => None,
     }
+}
+
+/// Strips a file-less `SetGradient`/`SetGradientAlpha` along its axis. The pass has one tint per
+/// quad, so a 16-slice fan stands in for the reference's four corner colours. VERTICAL: first stop
+/// at the bottom (y-up), second at the top, matching `ColorValueTexture`'s black-at-bottom winding.
+const GRADIENT_STRIPS: usize = 16;
+
+fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        a[3] + (b[3] - a[3]) * t,
+    ]
+}
+
+fn gradient_strip_quads(
+    g: crate::script::Gradient,
+    fill: Option<[f32; 4]>,
+    additive: bool,
+    circular: bool,
+    rotation: f32,
+    rect: Rect,
+    alpha: f32,
+    clip: Option<Rect>,
+    scale: f32,
+    target: ZTarget,
+    z: u64,
+) -> Vec<ExtractedQuad> {
+    let n = GRADIENT_STRIPS as f32;
+    (0..GRADIENT_STRIPS)
+        .map(|i| {
+            let t0 = i as f32 / n;
+            let t1 = (i + 1) as f32 / n;
+            let stop = lerp4(g.start, g.end, (t0 + t1) * 0.5);
+            let strip = if g.vertical {
+                Rect::new(
+                    rect.bottom + rect.height() * t0,
+                    rect.left,
+                    rect.bottom + rect.height() * t1,
+                    rect.right,
+                )
+            } else {
+                Rect::new(
+                    rect.bottom,
+                    rect.left + rect.width() * t0,
+                    rect.top,
+                    rect.left + rect.width() * t1,
+                )
+            };
+            ExtractedQuad {
+                target,
+                z,
+                rect: Some(strip),
+                alpha,
+                content: QuadContent::Texture {
+                    path: None,
+                    color: texture_color(fill, Some(stop)),
+                    additive,
+                    tex_coords: None,
+                    circular,
+                    portrait_unit: None,
+                    rotation,
+                    desaturated: false,
+                },
+                clip,
+                scale,
+            }
+        })
+        .collect()
 }
 
 /// A StatusBar's fill rect: the frame rect scaled by the value fraction, rightward from the left

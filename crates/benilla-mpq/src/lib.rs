@@ -1,6 +1,6 @@
-//! A read-only MPQ reader for the 1.12.1 `Data/` chain: format V1/V2, every file stored whole or
-//! `COMPRESS`-flagged and sectored, no encrypted or single-unit files, no PTCH patches. Anything
-//! else is a hard error.
+//! A read-only MPQ reader for the 1.12.1 `Data/` chain: format V1/V2, every file stored whole,
+//! `COMPRESS`-flagged and sectored, or single-unit (the whole file one blob). No encrypted files,
+//! no PTCH patches. Anything else is a hard error.
 //!
 //! The patch archives carry delete markers (flag `0x02000000`, size 0): the path is deleted from
 //! the composite chain. [`Archive::contains`] reports one present and [`Archive::read_file`]
@@ -51,6 +51,8 @@ struct HashEntry {
 #[derive(Clone, Copy)]
 struct BlockEntry {
     file_pos: u32,
+    /// Packed size on disk. A sectored file sizes its sectors from the offset table instead.
+    comp_size: u32,
     file_size: u32,
     flags: u32,
 }
@@ -217,12 +219,9 @@ impl Archive {
         if block.flags & FLAG_DELETE_MARKER != 0 {
             return Err(Error::NotFound(name.into()));
         }
-        // Outside the 1.12.1 envelope: refuse rather than guess.
+        // Encrypted files need a per-file key; 1.12 Data does not ship them.
         if block.flags & FLAG_ENCRYPTED != 0 {
             return Err(Error::Unsupported(format!("encrypted file {name}")));
-        }
-        if block.flags & FLAG_SINGLE_UNIT != 0 {
-            return Err(Error::Unsupported(format!("single-unit file {name}")));
         }
 
         let file = File::open(&idx.path)?;
@@ -230,6 +229,7 @@ impl Archive {
         let file_size = block.file_size as usize;
         let compressed = block.flags & (FLAG_COMPRESS | FLAG_IMPLODE) != 0;
         let implode_only = block.flags & FLAG_IMPLODE != 0 && block.flags & FLAG_COMPRESS == 0;
+        let single_unit = block.flags & FLAG_SINGLE_UNIT != 0;
 
         let file_len = file.metadata()?.len();
         let avail = avail_from(file_len, file_pos);
@@ -247,12 +247,26 @@ impl Archive {
             sector: None,
         };
         if !compressed {
-            // Stored: exactly `file_size` raw bytes, refused up front if the file cannot hold them.
+            // Stored whole: stock archives, and the SolarCraft repair/patch writers
+            // (`FLAG_SINGLE_UNIT`, packed size == file size, no sector table).
             if capped(file_size, 1, avail) < file_size {
                 return Err(Error::Corrupt(format!(
                     "{name}: stored size ({file_size}) larger than the archive"
                 )));
             }
+            return Ok(open);
+        }
+        if single_unit {
+            // One compressed blob of `comp_size` bytes, no sector offset table.
+            let comp_size = block.comp_size as usize;
+            let comp_cap = capped(comp_size, 1, avail);
+            if comp_cap < comp_size {
+                return Err(Error::Corrupt(format!(
+                    "{name}: single-unit packed size ({comp_size}) larger than the archive"
+                )));
+            }
+            open.offsets = Some(vec![0, block.comp_size]);
+            open.sector_size = file_size.max(1);
             return Ok(open);
         }
 
@@ -559,7 +573,7 @@ fn read_block_table(
             let o = i * 4;
             BlockEntry {
                 file_pos: words[o],
-                // words[o + 1] is compressed_size, unread: the offset table sizes the sectors.
+                comp_size: words[o + 1],
                 file_size: words[o + 2],
                 flags: words[o + 3],
             }
@@ -708,6 +722,47 @@ mod tests {
         }
         bytes.extend_from_slice(data);
         bytes
+    }
+
+    /// Uncompressed single-unit (SolarCraft patch-S/U/V/W/Y): stored whole, no sector table.
+    #[test]
+    fn single_unit_stored_entry_reads_its_bytes() {
+        let (arc, path) = open_temp_kept(
+            "single_unit_stored",
+            &archive_with_one_entry(
+                "Item\\ObjectComponents\\Cape\\a.blp",
+                FLAG_EXISTS | FLAG_SINGLE_UNIT,
+                b"BLP2hello",
+            ),
+        );
+        assert_eq!(
+            arc.read_file("Item\\ObjectComponents\\Cape\\a.blp")
+                .unwrap(),
+            b"BLP2hello"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Compressed single-unit: one zlib blob, `comp_size` from the block table, no offset table.
+    #[test]
+    fn single_unit_compressed_entry_reads_its_bytes() {
+        use flate2::{write::ZlibEncoder, Compression};
+        use std::io::Write;
+        let plain = vec![7u8; 2000];
+        let mut e = ZlibEncoder::new(vec![0x02u8], Compression::default());
+        e.write_all(&plain).unwrap();
+        let packed = e.finish().unwrap();
+        let (arc, path) = open_temp_kept(
+            "single_unit_zlib",
+            &archive_with_one_block(
+                "a.bin",
+                FLAG_EXISTS | FLAG_COMPRESS | FLAG_SINGLE_UNIT,
+                &packed,
+                plain.len() as u32,
+            ),
+        );
+        assert_eq!(arc.read_file("a.bin").unwrap(), plain);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The control for the delete-marker test: the same builder's plain entry reads back.

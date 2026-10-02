@@ -354,8 +354,8 @@ pub(crate) struct RegionData {
     /// [`Self::texture`]: setting one clears the other. The reference makes an 8×8 texture of it
     /// (`0x770360` → `0x44a9c0` → `0x5c5350`), so its alpha multiplies with the vertex colour's.
     pub(crate) fill: Option<[f32; 4]>,
-    /// `SetGradientAlpha`/`SetGradient`, stored whole and drawn as its midpoint: the renderer has
-    /// one tint per quad, so the reference's gradient is not built.
+    /// `SetGradientAlpha`/`SetGradient`, the four corner colours at `+0xb8`. A file-less region
+    /// is sliced into strips at extract; a file is tinted by the midpoint.
     pub(crate) gradient: Option<Gradient>,
     /// `SetVertexColor` (`0x79abd0` → `0x77f750`, `+0xb8`), `SetStatusBarColor` or a text colour,
     /// drawn as `texel × colour` per channel, alpha included: a `<Color 1,1,1,0.2>` tinted

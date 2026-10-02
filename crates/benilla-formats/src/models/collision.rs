@@ -26,17 +26,52 @@ impl CollisionMesh {
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
     }
+
+    /// Drop a canopy-volume hull so it does not block walking. Elwynn oaks (`ElwynnTreeCanopy01`)
+    /// author a 14×16 yd (vanilla) / 32×42 yd (patch-D) triangle soup whose walk-height radius is
+    /// ~7.5 yd, so empty grass around the trunk is solid; the trunk is a separate doodad
+    /// (`ElwynnTreeMid01`, ~1.4 yd). Fences stay: they are long on one ground axis and thin on the
+    /// other. Empty when this hull is a canopy volume.
+    pub fn without_canopy_volume(self) -> Self {
+        if canopy_volume(&self.positions) {
+            Self::default()
+        } else {
+            self
+        }
+    }
+}
+
+/// Both ground-plane extents at or above this (yd) means a canopy volume, not a prop. Stumps sit
+/// at ~4.5 yd; vanilla `ElwynnTreeCanopy01` at 14 yd.
+const CANOPY_HULL_EXTENT: f32 = 8.0;
+
+fn canopy_volume(positions: &[[f32; 3]]) -> bool {
+    if positions.is_empty() {
+        return false;
+    }
+    let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
+    let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
+    for p in positions {
+        min_x = min_x.min(p[0]);
+        min_y = min_y.min(p[1]);
+        max_x = max_x.max(p[0]);
+        max_y = max_y.max(p[1]);
+    }
+    (max_x - min_x).abs() >= CANOPY_HULL_EXTENT && (max_y - min_y).abs() >= CANOPY_HULL_EXTENT
 }
 
 /// An M2 doodad's collision hull, the header's `bounding_vertices` (`C3Vector`) and
 /// `bounding_triangles` (`u16` indices): a coarse solid far smaller than the render mesh, so the
-/// trunk blocks and the canopy does not. A doodad with no hull does not collide.
+/// trunk blocks and the canopy does not. A doodad with no hull does not collide. Canopy-volume
+/// hulls are dropped, see [`CollisionMesh::without_canopy_volume`].
 pub fn load_m2_collision_hull(chain: &mut Chain, raw_path: &str) -> Result<CollisionMesh> {
     let path = model_path(raw_path);
     let bytes = chain
         .read_file(&path)
         .with_context(|| format!("reading M2 {path}"))?;
-    parse_m2_collision_hull(&bytes).with_context(|| format!("parsing M2 {path}"))
+    parse_m2_collision_hull(&bytes)
+        .map(CollisionMesh::without_canopy_volume)
+        .with_context(|| format!("parsing M2 {path}"))
 }
 
 /// [`load_m2_collision_hull`] from file bytes already in hand; empty when there is no hull.
@@ -176,5 +211,50 @@ fn accumulate_wmo_group_faces(
             });
             indices.push(global);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn box_hull(positions: Vec<[f32; 3]>) -> CollisionMesh {
+        CollisionMesh {
+            positions,
+            indices: vec![0, 1, 2, 0, 2, 3],
+        }
+    }
+
+    #[test]
+    fn a_fat_ground_hull_is_a_canopy_volume() {
+        let m = box_hull(vec![
+            [-8.0, -8.0, 0.0],
+            [8.0, -8.0, 0.0],
+            [8.0, 8.0, 10.0],
+            [-8.0, 8.0, 10.0],
+        ]);
+        assert!(m.without_canopy_volume().is_empty());
+    }
+
+    #[test]
+    fn a_thin_fence_hull_still_collides() {
+        let m = box_hull(vec![
+            [-4.2, -0.14, -0.5],
+            [0.1, -0.14, -0.5],
+            [0.1, 0.13, 1.8],
+            [-4.2, 0.13, 1.8],
+        ]);
+        assert_eq!(m.without_canopy_volume().triangle_count(), 2);
+    }
+
+    #[test]
+    fn a_trunk_hull_still_collides() {
+        let m = box_hull(vec![
+            [-1.3, -1.3, 0.0],
+            [1.3, -1.3, 0.0],
+            [1.3, 1.3, 10.0],
+            [-1.3, 1.3, 10.0],
+        ]);
+        assert_eq!(m.without_canopy_volume().triangle_count(), 2);
     }
 }

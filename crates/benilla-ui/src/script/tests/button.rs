@@ -367,6 +367,49 @@ fn disabled_button_swallows_clicks_checkbutton_toggles_before_onclick() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
+/// `SetChecked` (`0x799bf0`) is `GetBoolOrDefault` with default 1: no argument checks, nil
+/// unchecks. pfUI's GUI writes `if category[config] == "1" then frame.input:SetChecked() end`.
+#[test]
+fn set_checked_missing_argument_defaults_to_checked() {
+    let s = script();
+    s.run(r#"cb = CreateFrame("CheckButton", "PfuiBox")"#)
+        .unwrap();
+
+    s.run("PfuiBox:SetChecked()").unwrap();
+    assert!(
+        s.eval::<bool>("return PfuiBox:GetChecked() == 1").unwrap(),
+        "SetChecked() with no argument checks"
+    );
+
+    s.run("PfuiBox:SetChecked(nil)").unwrap();
+    assert!(
+        s.eval::<bool>("return PfuiBox:GetChecked() == nil")
+            .unwrap(),
+        "SetChecked(nil) unchecks"
+    );
+
+    s.run(r#"PfuiBox:SetChecked("yes")"#).unwrap();
+    assert!(
+        s.eval::<bool>("return PfuiBox:GetChecked() == 1").unwrap(),
+        "first-byte Y of \"yes\" checks"
+    );
+
+    s.run(r#"PfuiBox:SetChecked("junk")"#).unwrap();
+    assert!(
+        s.eval::<bool>("return PfuiBox:GetChecked() == 1").unwrap(),
+        "an unmapped string takes the default (checked)"
+    );
+
+    s.run("PfuiBox:SetChecked(0.5)").unwrap();
+    assert!(
+        s.eval::<bool>("return PfuiBox:GetChecked() == nil")
+            .unwrap(),
+        "0.5 truncates to 0 and unchecks"
+    );
+
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
 #[test]
 fn default_registration_is_left_click_only_right_click_reaches_nothing() {
     let mut s = script();

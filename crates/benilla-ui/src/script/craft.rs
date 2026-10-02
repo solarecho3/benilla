@@ -71,15 +71,16 @@ pub struct CraftRecipe {
     /// The Requirements line's `(tool name, have)` pairs (`GetCraftSpellFocus`).
     pub tools: Vec<(String, bool)>,
     pub tooltip: CraftTooltip,
-    /// `Spell.dbc` `spellLevel` (`+0x74`), the Beast Training comparator's rank key. The
-    /// reference's `requiredLevel` return comes from it; here that return is 0.
+    /// `Spell.dbc` `spellLevel` (`+0x74`), the Beast Training comparator's rank key and
+    /// `GetCraftInfo`'s `requiredLevel` (`Blizzard_CraftUI.lua:168`).
     pub spell_level: u32,
 }
 
 /// The open craft window, pushed whole by the app.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CraftState {
-    /// The title `GetCraftName` answers, also `GetCraftDisplaySkillLine`'s name.
+    /// The title `GetCraftName` answers. `GetCraftDisplaySkillLine` uses it for Enchanting and
+    /// answers nil for Beast Training, which hides the rank bar.
     pub name: String,
     pub rank: u32,
     pub max_rank: u32,
@@ -195,15 +196,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetCraftDisplaySkillLine() → name, rank, maxRank; the name is nil when closed, which hides
-    // the rank bar (`Blizzard_CraftUI.lua:108-109`).
+    // GetCraftDisplaySkillLine() → name, rank, maxRank. The name is nil when closed and at Beast
+    // Training (`craft_type` 1), which hides the 0/0 rank bar (`Blizzard_CraftUI.lua:108-109`).
     g.set(
         "GetCraftDisplaySkillLine",
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             let (name, rank, max_rank) = match &model.craft {
-                Some(c) => (Some(c.name.clone()), c.rank, c.max_rank),
-                None => (None, 0, 0),
+                Some(c) if c.craft_type != CRAFT_TYPE_BEAST_TRAINING => {
+                    (Some(c.name.clone()), c.rank, c.max_rank)
+                }
+                _ => (None, 0, 0),
             };
             Ok(MultiValue::from_vec(vec![
                 opt_str(lua, name.as_ref())?,
@@ -273,7 +276,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     // GetCraftInfo(index) → craftName, craftSubSpellName, craftType, numAvailable, isExpanded,
     // trainingPointCost, requiredLevel (`Blizzard_CraftUI.lua:168`); one nil past the end.
-    // `isExpanded` is always nil; Beast Training's cost and level answer 0, not built.
+    // `isExpanded` is always nil. `requiredLevel` is `spellLevel`. Training-point cost is 0:
+    // `SkillLineAbility` column 14 and `manaCost` are 0 on every Beast Training row.
     g.set(
         "GetCraftInfo",
         lua.create_function(|lua, index: usize| {
@@ -288,7 +292,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Value::Integer(i64::from(r.num_available)),
                 Value::Nil,
                 Value::Integer(0),
-                Value::Integer(0),
+                Value::Integer(i64::from(r.spell_level)),
             ]))
         })?,
     )?;
@@ -732,6 +736,21 @@ mod tests {
                 "Fire Resistance (Rank 3)",
                 "Fire Resistance (Rank 4)",
             ]
+        );
+        assert_eq!(
+            s.eval::<i64>("local _,_,_,_,_,_,l = GetCraftInfo(1) return l")
+                .unwrap(),
+            20,
+            "Arcane Resistance Rank 1 requiredLevel is spellLevel 20"
+        );
+        assert!(
+            s.eval::<bool>("return GetCraftDisplaySkillLine() == nil")
+                .unwrap(),
+            "Beast Training hides the 0/0 rank bar"
+        );
+        assert_eq!(
+            s.eval::<String>("return GetCraftName()").unwrap(),
+            "Beast Training"
         );
 
         // The same rows at the Enchanting type take `0x4f67a0`, with no `spellLevel` key: the ranks

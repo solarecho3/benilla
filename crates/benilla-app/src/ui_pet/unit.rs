@@ -87,7 +87,10 @@ pub(super) fn feed_pet_unit(
                 .map(str::to_string);
             // No `ChrClasses.dbc`: the reference reads a class only for TYPEMASK_PLAYER.
             let types = CreatureTypeSources::of_resources(&names, spells.as_deref());
-            snapshot(store, pet_guid, name, 0, None, types)
+            let mut s = snapshot(store, pet_guid, name, 0, None, types);
+            // Own pet: `CanAssist`'s player-controlled arm. Reaction on this token is 0.
+            s.can_assist = true;
+            s
         });
 
     let dirty = match (&fresh, &memory.pushed) {

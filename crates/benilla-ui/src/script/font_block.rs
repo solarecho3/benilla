@@ -16,6 +16,7 @@
 
 use mlua::{Lua, Table, Value};
 
+use super::binding_abi::optional_string;
 use super::object::as_f32;
 use super::{FontShadow, Model, Outline};
 use crate::widget::RegionHandle;
@@ -54,6 +55,13 @@ pub(super) fn set_font_args(
         _ => return Err(usage()),
     };
     Ok((path, height))
+}
+
+/// Optional `SetFont` flags: a string or number is kept, anything else (nil, boolean, table) is
+/// omitted, matching `lua_isstring` on the fourth argument of `0x79f210`. Addons write
+/// `cond and "OUTLINE"` and pass boolean `false` when the flag is off.
+pub(super) fn set_font_flags(lua: &Lua, flags: Option<&Value>) -> Option<String> {
+    flags.and_then(|v| optional_string(lua, v))
 }
 
 /// Install the ten font-block methods onto `m`, reading `this` through `resolve`; only for a
@@ -134,8 +142,9 @@ pub(super) fn install(
     m.set(
         "SetFont",
         lua.create_function(
-            move |lua, (this, file, height, flags): (Table, Value, Value, Option<String>)| {
+            move |lua, (this, file, height, flags): (Table, Value, Value, Option<Value>)| {
                 let (path, height) = set_font_args(&file, &height, widget)?;
+                let flags = set_font_flags(lua, flags.as_ref());
                 let rh = resolve(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let before = model
@@ -204,16 +213,12 @@ pub(super) fn install(
     m.set(
         "SetTextColor",
         lua.create_function(
-            move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
-                let (r, g, b) = (
-                    super::object::as_f32(&r),
-                    super::object::as_f32(&g),
-                    super::object::as_f32(&b),
-                );
+            move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let color = super::object::color_rgba(&r, &g, &b, &a, 1.0);
                 let rh = resolve(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();
-                d.vertex_color = Some([r, g, b, a.unwrap_or(1.0)]);
+                d.vertex_color = Some(color);
                 // Clears the colour inherit bit (`0x79dbd0`): it survives a font-object repaint.
                 d.font_explicit.color = true;
                 Ok(())
@@ -243,20 +248,13 @@ pub(super) fn install(
         "SetShadowColor",
         lua.create_function(
             // r, g and b are a bare `lua_tonumber` (`0x79dd40`), as in `SetTextColor`.
-            move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
-                let (r, g, b) = (
-                    super::object::as_f32(&r),
-                    super::object::as_f32(&g),
-                    super::object::as_f32(&b),
-                );
+            move |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let color = super::object::color_rgba(&r, &g, &b, &a, 1.0);
                 let rh = resolve(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();
                 let offset = d.font_shadow.map_or([0.0, 0.0], |s| s.offset);
-                d.font_shadow = Some(FontShadow {
-                    offset,
-                    color: [r, g, b, a.unwrap_or(1.0)],
-                });
+                d.font_shadow = Some(FontShadow { offset, color });
                 d.font_explicit.shadow = true;
                 Ok(())
             },

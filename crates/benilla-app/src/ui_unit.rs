@@ -1268,6 +1268,8 @@ fn feed_units(
             .map(str::to_string);
         let mut s = snapshot(store, guid.0, name, 0, chr, types);
         s.is_player = true;
+        // The caster always assists himself (`spell::cast_target::assistable` `is_self`).
+        s.can_assist = true;
         s.raid_target = group.raid_target_index(guid.0);
         s.faction_group = faction_group(store, factions.as_deref());
         s.faction_group_localized = faction_group_localized(store, factions.as_deref());

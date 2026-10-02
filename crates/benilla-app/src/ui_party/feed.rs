@@ -800,7 +800,9 @@ fn member_unit_state(
     };
     s.is_player = true;
     // A party member is always a same-faction friendly player: the popup's `UnitCanCooperate`
-    // gate reads the reaction, which neither leg resolves for a party token.
+    // gate reads the reaction, which neither leg resolves for a party token. `CanAssist`'s
+    // player-controlled arm then passes, so `UnitCanAssist("player", "partyN")` is 1.
+    s.can_assist = true;
     s.raid_target = group.raid_target_index(m.guid);
     s.reaction = 5;
     s.faction_group = own_group;

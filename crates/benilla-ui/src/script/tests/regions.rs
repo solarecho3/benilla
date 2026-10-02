@@ -684,10 +684,9 @@ fn set_texture_ignores_arguments_past_the_path_like_the_client_does() {
         .expect("clear, blank and the plain colour form are unaffected");
 }
 
-/// A gradient fills the texture slot the colour form fills, so a gradient-only region paints;
-/// both stops are stored, and the quad paints their midpoint, not the gradient.
+/// A file-less gradient paints as strips along its axis: the pass has one tint per quad.
 #[test]
-fn a_gradient_is_stored_whole_and_painted_as_its_midpoint() {
+fn a_fileless_gradient_paints_as_strips_along_its_axis() {
     let mut s = script();
     s.run(
         r#"
@@ -703,28 +702,84 @@ fn a_gradient_is_stored_whole_and_painted_as_its_midpoint() {
     .expect("SetGradientAlpha must exist and accept the client's argument shape");
 
     s.resolve();
-    let painted = s.extract().iter().any(|q| {
-        matches!(&q.content, crate::script::QuadContent::Texture { color: Some(c), .. }
-            // midpoint of alpha 0.0 and 0.5
-            if (c[3] - 0.25).abs() < 1e-6 && c[0] == 1.0)
-    });
+    let alphas: Vec<f32> = s
+        .extract()
+        .iter()
+        .filter_map(|q| match &q.content {
+            crate::script::QuadContent::Texture { color: Some(c), .. } if c[0] == 1.0 => Some(c[3]),
+            _ => None,
+        })
+        .collect();
     assert!(
-        painted,
-        "a region carrying only a gradient must paint, at the midpoint of its two stops"
+        alphas.len() > 1,
+        "a file-less gradient must slice into more than one quad, got {}",
+        alphas.len()
+    );
+    let first = *alphas.first().unwrap();
+    let last = *alphas.last().unwrap();
+    assert!(
+        first < 0.1 && last > 0.4,
+        "VERTICAL first stop is the bottom (near 0), second the top (near 0.5); got {first} .. {last}"
     );
 
     // Any orientation token but "VERTICAL" is horizontal.
     s.run("t:SetGradient('HORIZONTAL', 1, 0, 0, 0, 0, 1)")
         .expect("SetGradient takes six colour arguments and no alpha");
     s.resolve();
-    let mid = s.extract().iter().find_map(|q| match &q.content {
-        crate::script::QuadContent::Texture { color: Some(c), .. } => Some(*c),
-        _ => None,
-    });
-    assert_eq!(
-        mid.map(|c| [c[0], c[1], c[2], c[3]]),
-        Some([0.5, 0.0, 0.5, 1.0]),
-        "SetGradient's stops are opaque, so the midpoint alpha is 1"
+    let reds: Vec<f32> = s
+        .extract()
+        .iter()
+        .filter_map(|q| match &q.content {
+            crate::script::QuadContent::Texture { color: Some(c), .. } => Some(c[0]),
+            _ => None,
+        })
+        .collect();
+    assert!(reds.len() > 1);
+    assert!(
+        reds[0] > 0.8 && *reds.last().unwrap() < 0.2,
+        "HORIZONTAL first stop is the left (red), second the right (blue); got {reds:?}"
+    );
+}
+
+/// pfUI AFK: a white solid then a black alpha ramp must not stay white. The fill is the texel,
+/// the gradient the vertex colour, so the product is the letterbox fade.
+#[test]
+fn a_white_fill_then_a_black_alpha_ramp_is_not_a_white_bar() {
+    let mut s = script();
+    s.run(
+        r#"
+        f = CreateFrame("Frame", "AfkBar")
+        f:SetWidth(400) f:SetHeight(100)
+        f:SetPoint("TOPLEFT", 0, 0)
+        t = f:CreateTexture(nil, "BACKGROUND")
+        t:SetAllPoints(f)
+        t:SetTexture(1, 1, 1, 1)
+        t:SetGradientAlpha("VERTICAL", 0, 0, 0, 0, 0, 0, 0, 1)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let colors: Vec<[f32; 4]> = s
+        .extract()
+        .iter()
+        .filter_map(|q| match &q.content {
+            crate::script::QuadContent::Texture { color: Some(c), .. } => Some(*c),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        colors.len() > 1,
+        "the AFK letterbox is a fade, not one solid"
+    );
+    assert!(
+        colors
+            .iter()
+            .all(|c| c[0] < 0.05 && c[1] < 0.05 && c[2] < 0.05),
+        "white texel × black vertices is black, not white: {colors:?}"
+    );
+    assert!(
+        colors[0][3] < 0.1 && colors.last().unwrap()[3] > 0.9,
+        "bottom of the top bar is clear, the screen edge is opaque"
     );
 }
 

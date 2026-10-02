@@ -255,9 +255,12 @@ impl AssetLoader for M2ModelLoader {
                 b.sphere_radius,
             )
         });
-        // An empty hull is no hull: the model does not collide.
+        // An empty hull is no hull: the model does not collide. Canopy-volume hulls (both
+        // ground extents ≥ 8 yd) are dropped so empty grass around an oak is walkable; the
+        // trunk is a separate doodad.
         let collision = parse_m2_collision_hull(&bytes)
             .ok()
+            .map(CollisionMesh::without_canopy_volume)
             .filter(|c| !c.is_empty());
 
         let mut submeshes = Vec::with_capacity(subs.len());

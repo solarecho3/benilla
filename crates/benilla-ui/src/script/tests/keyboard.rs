@@ -58,6 +58,74 @@ fn only_an_onkeyup_still_swallows_the_key_down() {
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
 
+/// The sticky key-up (`0x76bba0`): a frame with only `OnKeyUp` still swallows the down, then the
+/// matching release fires that handler. pfUI hoverbind is this shape.
+#[test]
+fn the_matching_key_up_fires_onkeyup_on_the_down_consumer() {
+    let mut s = script();
+    s.run(
+        r#"
+        got = nil
+        f = CreateFrame("Frame", "KbHoverbind")
+        f:EnableKeyboard(true)
+        f:SetScript("OnKeyUp", function() got = arg1 end)
+    "#,
+    )
+    .unwrap();
+    assert!(s.key_input("1"), "OnKeyUp alone still consumes the down");
+    assert_eq!(s.eval::<Option<String>>("return got").unwrap(), None);
+    assert!(s.key_up_input("1"), "the sticky consumer takes the up");
+    assert_eq!(
+        s.eval::<Option<String>>("return got").unwrap().as_deref(),
+        Some("1")
+    );
+    assert!(!s.key_up_input("1"), "a second up with no down is a no-op");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// A hidden or keyboard-disabled consumer does not get the up (`0x76bba0` still checks membership).
+#[test]
+fn a_hidden_down_consumer_does_not_get_the_key_up() {
+    let mut s = script();
+    s.run(
+        r#"
+        ups = 0
+        f = CreateFrame("Frame", "KbHiddenUp")
+        f:EnableKeyboard(true)
+        f:SetScript("OnKeyUp", function() ups = ups + 1 end)
+    "#,
+    )
+    .unwrap();
+    assert!(s.key_input("F1"));
+    s.run("f:Hide()").unwrap();
+    assert!(!s.key_up_input("F1"));
+    assert_eq!(s.eval::<i64>("return ups").unwrap(), 0);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// `frame_key_input` (letters, the host's hoverbind path) latches the same sticky target.
+#[test]
+fn frame_key_input_latches_the_same_key_up_target() {
+    let mut s = script();
+    s.run(
+        r#"
+        got = nil
+        f = CreateFrame("Frame", "KbLetterUp")
+        f:EnableKeyboard(true)
+        f:SetScript("OnKeyUp", function() got = arg1 end)
+    "#,
+    )
+    .unwrap();
+    assert!(s.frame_key_input("Q"));
+    assert_eq!(s.eval::<Option<String>>("return got").unwrap(), None);
+    assert!(s.key_up_input("Q"));
+    assert_eq!(
+        s.eval::<Option<String>>("return got").unwrap().as_deref(),
+        Some("Q")
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
 /// The walk (`0x765f10`, `0x764ae2`) runs strata descending, then level, then registration order.
 #[test]
 fn the_walk_is_strata_then_level_then_registration() {

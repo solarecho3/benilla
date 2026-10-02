@@ -176,10 +176,11 @@ impl CharSections {
             .map(Some)
     }
 
-    /// What a body composite reads and where each file lands, from the tables alone: the 256²
-    /// base skin, the head overlays, the underwear, the equipment by bodyslot − 2 and the guild
-    /// emblem ([`equip_blits`]), in blit order; `None` without a base skin row. It owns its paths,
-    /// so [`CompositePlan::run`] can read and blit on any thread.
+    /// What a body composite reads and where each file lands, from the tables alone: the base
+    /// skin (256² stock, 512²/1024² on HD packs), the head overlays, the underwear, the equipment
+    /// by bodyslot − 2 and the guild emblem ([`equip_blits`]), in blit order; `None` without a
+    /// base skin row. Overlay tiles stay in 256² space and [`blit_over`] scales them to the atlas.
+    /// It owns its paths, so [`CompositePlan::run`] can read and blit on any thread.
     pub fn composite_plan(
         &self,
         race: u8,
@@ -511,8 +512,18 @@ pub fn forearm_dressed(equipment: &[Option<&ItemDisplay>; 8]) -> bool {
 }
 
 /// A layer's atlas rect `(x, y, w, h)` in the 256² body atlas (`0x475c50`).
+/// HD skins are 512² or 1024²; [`blit_over`] scales this rect to the atlas.
 pub fn equip_tile(layer: usize) -> Option<(u32, u32, u32, u32)> {
     EQUIP_TILES.get(layer).copied()
+}
+
+/// Map a 256² tile onto an atlas of `width`×`height`. Stock skins are 256² (scale 1); HD packs
+/// ship 512² or 1024² with matching 2×/4× region sheets.
+fn scale_tile(tile: Tile, width: u32, height: u32) -> Tile {
+    let sx = (width / 256).max(1);
+    let sy = (height / 256).max(1);
+    let (x, y, w, h) = tile;
+    (x * sx, y * sy, w * sx, h * sy)
 }
 
 /// A layer's `Item\TextureComponents\` subdirectory.
@@ -529,15 +540,18 @@ pub fn equip_region_candidates(layer: usize, name: &str, sex: u8) -> [String; 2]
     ['U', letter].map(|c| format!("Item\\TextureComponents\\{dir}\\{name}_{c}.blp"))
 }
 
-/// Source-over blit of an overlay's mip pyramid at `tile`, level by level, from the overlay's own
-/// origin (`0x4770f0`: src `(0,0)`, extent the tile); an opaque texel copies, the client's REPLACE.
+/// Source-over blit of an overlay's mip pyramid at `tile`, level by level. `tile` is in 256²
+/// space (`0x475c50`); HD skins scale it so a 2× TorsoUpper sheet lands on the mesh's torso UVs
+/// instead of the upper-arm quadrant. The overlay is sampled across the whole source onto that
+/// scaled rect (stock 1.12 sheets already match; HD sheets are 2×/4× the stock tile).
+/// Opaque texels copy, matching the client's REPLACE (`0x4770f0`).
 fn blit_over(dst: &mut BlpMipChain, src: &BlpMipChain, tile: Tile) {
     // Both chains must be decoded RGBA: DXT blocks would blend into garbage without failing.
     debug_assert!(
         dst.is_rgba8() && src.is_rgba8(),
         "character-skin compositing needs decoded chains on both sides"
     );
-    let (tx, ty, tw, th) = tile;
+    let (tx, ty, tw, th) = scale_tile(tile, dst.width, dst.height);
     let levels = dst.mips.len().min(src.mips.len());
     for i in 0..levels {
         let dw = (dst.width >> i).max(1) as usize;
@@ -545,16 +559,22 @@ fn blit_over(dst: &mut BlpMipChain, src: &BlpMipChain, tile: Tile) {
         let sw = (src.width >> i).max(1) as usize;
         let sh = (src.height >> i).max(1) as usize;
         let (ox, oy) = ((tx >> i) as usize, (ty >> i) as usize);
-        let cw = ((tw >> i).max(1) as usize)
-            .min(sw)
-            .min(dw.saturating_sub(ox));
-        let ch = ((th >> i).max(1) as usize)
-            .min(sh)
-            .min(dh.saturating_sub(oy));
+        let cw = ((tw >> i).max(1) as usize).min(dw.saturating_sub(ox));
+        let ch = ((th >> i).max(1) as usize).min(dh.saturating_sub(oy));
+        if cw == 0 || ch == 0 {
+            continue;
+        }
         let (d, s) = (&mut dst.mips[i], &src.mips[i]);
+        let one_to_one = sw == cw && sh == ch;
         for row in 0..ch {
             for col in 0..cw {
-                let si = (row * sw + col) * 4;
+                let si = if one_to_one {
+                    (row * sw + col) * 4
+                } else {
+                    let sx = col * sw / cw;
+                    let sy = row * sh / ch;
+                    (sy * sw + sx) * 4
+                };
                 let di = ((oy + row) * dw + (ox + col)) * 4;
                 if si + 4 > s.len() || di + 4 > d.len() {
                     continue;
@@ -1200,6 +1220,24 @@ mod tests {
         }
     }
 
+    fn pixel(img: &BlpMipChain, x: u32, y: u32) -> &[u8] {
+        let i = ((y * img.width + x) * 4) as usize;
+        &img.mips[0][i..i + 4]
+    }
+
+    fn changed_in(a: &BlpMipChain, b: &BlpMipChain, tile: Tile) -> usize {
+        assert_eq!((a.width, a.height), (b.width, b.height));
+        let (x, y, w, h) = scale_tile(tile, a.width, a.height);
+        let stride = a.width;
+        (y..y + h)
+            .flat_map(|row| (x..x + w).map(move |col| (row, col)))
+            .filter(|&(row, col)| {
+                let i = ((row * stride + col) * 4) as usize;
+                a.mips[0][i..i + 4] != b.mips[0][i..i + 4]
+            })
+            .count()
+    }
+
     #[test]
     fn blit_over_replaces_blends_and_clamps() {
         let mut dst = chain(2, 2, [128, 128, 128, 255].repeat(4));
@@ -1231,6 +1269,45 @@ mod tests {
         assert_eq!(dst.mips[0], before, "transparent texel is a no-op");
     }
 
+    /// HD body skins are 512²; region sheets are 2× the 256² tiles. Painting the stock rect on a
+    /// 512 atlas leaves the mesh's torso UVs as skin (the SolarCraft naked-character bug).
+    #[test]
+    fn blit_over_scales_256_tiles_onto_an_hd_atlas() {
+        let grey = [10, 10, 10, 255];
+        let red = [200, 0, 0, 255];
+        let mut dst = chain(512, 512, grey.repeat(512 * 512));
+        blit_over(
+            &mut dst,
+            &chain(256, 128, red.repeat(256 * 128)),
+            EQUIP_TILES[3],
+        );
+        assert_eq!(pixel(&dst, 256, 0), red, "HD TorsoUpper origin");
+        assert_eq!(pixel(&dst, 511, 127), red, "HD TorsoUpper far corner");
+        assert_eq!(
+            pixel(&dst, 128, 0),
+            grey,
+            "256-space TorsoUpper origin stays base skin"
+        );
+        assert_eq!(
+            pixel(&dst, 255, 63),
+            grey,
+            "256-space TorsoUpper far corner stays base skin"
+        );
+
+        let mut dst = chain(512, 512, grey.repeat(512 * 512));
+        blit_over(
+            &mut dst,
+            &chain(128, 64, red.repeat(128 * 64)),
+            EQUIP_TILES[3],
+        );
+        assert_eq!(
+            pixel(&dst, 256, 0),
+            red,
+            "a stock-sized sheet still fills the HD tile"
+        );
+        assert_eq!(pixel(&dst, 511, 127), red, "upscaled to the HD far corner");
+    }
+
     /// On the shipped files a Human male's head and pelvis tiles change, and the torso does not.
     #[test]
     fn composite_body_overlays_land_on_real_human_male() {
@@ -1245,21 +1322,16 @@ mod tests {
             .expect("composite ok")
             .expect("base skin row present");
 
-        assert_eq!((comp.width, comp.height), (256, 256), "atlas is 256²");
+        assert_eq!(comp.width, comp.height, "atlas is square");
+        assert!(
+            comp.width.is_power_of_two() && comp.width >= 256,
+            "atlas is 256² stock or an HD 2×/4× skin, got {}²",
+            comp.width
+        );
         assert_eq!(comp.mips.len(), base.mips.len(), "keeps the base mip count");
 
         // Count mip-0 pixels in a tile that differ from the base atlas.
-        let changed = |t: Tile| {
-            let (x, y, w, h) = t;
-            let (b, c) = (&base.mips[0], &comp.mips[0]);
-            (y..y + h)
-                .flat_map(|row| (x..x + w).map(move |col| (row, col)))
-                .filter(|&(row, col)| {
-                    let i = ((row * 256 + col) * 4) as usize;
-                    b[i..i + 4] != c[i..i + 4]
-                })
-                .count()
-        };
+        let changed = |t: Tile| changed_in(&base, &comp, t);
         assert!(changed(TILE_G9) > 4000, "face lower overlaid into g9");
         assert!(changed(TILE_G8) > 2000, "face upper overlaid into g8");
         assert!(changed(TILE_G5) > 4000, "pelvis overlaid into g5");
@@ -1328,17 +1400,19 @@ mod tests {
             cs.hair_texture(1, 0, 1, 0)
         );
 
-        // The extra skin, M2 type 8: tauren author it, humans do not.
+        // The extra skin, M2 type 8: tauren author it. Stock humans do not; HD character packs
+        // sometimes add a human extra sheet on the same slot.
         assert_eq!(
             cs.skin_extra_texture(6, 0, 0),
             Some("Character\\Tauren\\Male\\TaurenMaleSkin00_00_Extra.blp"),
             "tauren male extra skin resolves"
         );
-        assert_eq!(
-            cs.skin_extra_texture(1, 0, 0),
-            None,
-            "human male authors no extra skin"
-        );
+        if let Some(path) = cs.skin_extra_texture(1, 0, 0) {
+            assert!(
+                path.contains("Human") && path.to_ascii_lowercase().contains("extra"),
+                "a human extra skin stays on the human extra slot, got {path}"
+            );
+        }
 
         // Skin colours 0 and 1 resolve the standard row, not the `0x1`-flagged `…_100`/`_101`.
         assert_eq!(
@@ -1371,21 +1445,21 @@ mod tests {
             "Character\\NightElf\\Female\\NightElfFemaleNakedTorsoSkin00_00.blp",
         )
         .expect("read naked torso");
-        assert_eq!(
-            (torso.width, torso.height),
-            (128, 64),
-            "the sheet is authored exactly tile-sized"
-        );
         let comp = cs
             .composite_body(
                 &mut chain, race, sex, skin, 0, 0, 0, 0, [None; 8], None, false,
             )
             .expect("composite ok")
             .expect("base skin row present");
-
-        let (tx, ty, tw, th) = TILE_G3;
+        let (tx, ty, tw, th) = scale_tile(TILE_G3, comp.width, comp.height);
+        assert_eq!(
+            (torso.width, torso.height),
+            (tw, th),
+            "the sheet matches the (possibly HD-scaled) TorsoUpper tile"
+        );
+        let stride = comp.width;
         for row in 0..th {
-            let d = ((ty + row) * 256 + tx) as usize * 4;
+            let d = ((ty + row) * stride + tx) as usize * 4;
             let s = (row * tw) as usize * 4;
             assert_eq!(
                 &comp.mips[0][d..d + tw as usize * 4],
@@ -1422,9 +1496,11 @@ mod tests {
                 })
                 .collect()
         };
-        let sheet = |img: &BlpMipChain| rect(img, (0, 0, 128, 64), 128);
+        let sheet = |img: &BlpMipChain| rect(img, (0, 0, img.width, img.height), img.width);
         let (torso_sheet, pelvis_sheet) = (sheet(&torso), sheet(&pelvis));
-        let (base_g3, base_g5) = (rect(&base, TILE_G3, 256), rect(&base, TILE_G5, 256));
+        let g3 = scale_tile(TILE_G3, base.width, base.height);
+        let g5 = scale_tile(TILE_G5, base.width, base.height);
+        let (base_g3, base_g5) = (rect(&base, g3, base.width), rect(&base, g5, base.width));
 
         // A display that takes the cell without painting it.
         let occupies = |layers: &[usize]| {
@@ -1517,10 +1593,11 @@ mod tests {
                 (TILE_G3, "torso", g3_want, g3),
                 (TILE_G5, "pelvis", g5_want, g5),
             ] {
-                let n = differing(&rect(&comp, tile, 256), want);
+                let scaled = scale_tile(tile, comp.width, comp.height);
+                let n = differing(&rect(&comp, scaled, comp.width), want);
                 assert_eq!(
                     n, 0,
-                    "{label}: the {name} tile is not {want_name} ({n}/8192 texels)"
+                    "{label}: the {name} tile is not {want_name} ({n} texels)"
                 );
             }
         }
@@ -1566,9 +1643,9 @@ mod tests {
             let mips = read_texture_mip_chain(&mut chain, &path).expect("re-read");
             let (_, _, tw, th) = EQUIP_TILES[step.layer];
             assert_eq!(
-                (mips.width, mips.height),
-                (tw, th),
-                "{path} is authored tile-sized"
+                mips.width * th,
+                mips.height * tw,
+                "{path} matches the tile aspect (stock 1× or HD 2×/4×)"
             );
         }
 
@@ -1579,11 +1656,13 @@ mod tests {
         };
         let plain = compose(None);
         let crested = compose(Some(emblem));
+        let stride = plain.width;
         let in_torso = |i: usize| {
-            let (x, y) = ((i % 256) as u32, (i / 256) as u32);
-            [EQUIP_TILES[3], EQUIP_TILES[4]]
-                .iter()
-                .any(|(tx, ty, tw, th)| x >= *tx && x < tx + tw && y >= *ty && y < ty + th)
+            let (x, y) = ((i as u32) % stride, (i as u32) / stride);
+            [EQUIP_TILES[3], EQUIP_TILES[4]].iter().any(|tile| {
+                let (tx, ty, tw, th) = scale_tile(*tile, plain.width, plain.height);
+                x >= tx && x < tx + tw && y >= ty && y < ty + th
+            })
         };
         let moved: Vec<usize> = plain.mips[0]
             .as_chunks::<4>()
@@ -1603,7 +1682,9 @@ mod tests {
             strays.is_empty(),
             "the emblem repainted {} texel(s) outside the torso tiles, first at {:?}",
             strays.len(),
-            strays.first().map(|i| (i % 256, i / 256))
+            strays
+                .first()
+                .map(|i| (i % stride as usize, i / stride as usize))
         );
 
         let other = compose(Some(GuildEmblem {
@@ -1656,16 +1737,7 @@ mod tests {
         equipment[4] = Some(boots);
         let dressed = compose(equipment);
 
-        let changed = |a: &BlpMipChain, b: &BlpMipChain, t: Tile| {
-            let (x, y, w, h) = t;
-            (y..y + h)
-                .flat_map(|row| (x..x + w).map(move |col| (row, col)))
-                .filter(|&(row, col)| {
-                    let i = ((row * 256 + col) * 4) as usize;
-                    a.mips[0][i..i + 4] != b.mips[0][i..i + 4]
-                })
-                .count()
-        };
+        let changed = |a: &BlpMipChain, b: &BlpMipChain, t: Tile| changed_in(a, b, t);
         assert!(
             changed(&naked, &dressed, EQUIP_TILES[3]) > 2000,
             "shirt repaints TorsoUpper (g3)"

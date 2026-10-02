@@ -498,6 +498,9 @@ fn button_set_font_returns_nothing_and_is_a_no_op_without_a_label() {
     );
     // Both arguments are required (`lua_isstring` + `lua_isnumber`, else the usage error).
     assert!(s.run(r#"SFBare:SetFont("Fonts\\SKURRI.TTF")"#).is_err());
+    // A boolean flags argument is omitted (`cond and "OUTLINE"` is false when off).
+    s.run(r#"SFBare:SetFont("Fonts\\FRIZQT__.TTF", 8, false)"#)
+        .unwrap();
 
     // Unset locally, GetFont reads through the normal state's font object.
     s.run(
@@ -1553,6 +1556,11 @@ fn set_world_detail_writes_the_stop_table_and_validates_like_the_reference() {
     // The getter ignores an argument; pfUI's hook passes one.
     assert_eq!(s.eval::<i64>("return GetWorldDetail(7)").unwrap(), 1);
     assert_eq!(stop(&s).as_deref(), Some("1"));
+
+    // An extended stop stored on WorldDetail (the Graphics row, or a frillDensity mirror)
+    // round-trips; SetWorldDetail still raises past 2.
+    s.run(r#"SetCVar("WorldDetail", "15")"#).unwrap();
+    assert_eq!(s.eval::<i64>("return GetWorldDetail()").unwrap(), 15);
 }
 
 /// pfUI's `hdgraphic` module (`modules/hdgraphic.lua:4-39`), which hooks both verbs to drive

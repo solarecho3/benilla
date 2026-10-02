@@ -3,7 +3,7 @@
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use crate::script::object::{as_f32, draw_layer_from_str, draw_layer_name};
+use crate::script::object::{as_f32, draw_layer_from_str, draw_layer_name, is_lua_number};
 use crate::script::{BlendMode, Model, TexCoords};
 
 use super::region_handle_of;
@@ -42,12 +42,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     m.set(
         "SetVertexColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
-                let (r, g, b) = (as_f32(&r), as_f32(&g), as_f32(&b));
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
+                let color = crate::script::object::color_rgba(&r, &g, &b, &a, 1.0);
                 let rh = region_handle_of(lua, &this)?;
                 let mut model = lua.app_data_mut::<Model>().expect("model");
                 let d = model.region_data.entry(rh).or_default();
-                d.vertex_color = Some([r, g, b, a.unwrap_or(1.0)]);
+                d.vertex_color = Some(color);
+                // `+0xb8`: a uniform colour flattens the four-corner gradient.
+                d.gradient = None;
                 // The slot `SetTextColor` writes on a FontString, so it overrides the font object.
                 d.font_explicit.color = true;
                 Ok(())
@@ -107,6 +109,8 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     start,
                     end,
                 });
+                // `+0xb8`: the four corner colours replace a uniform `SetVertexColor`.
+                d.vertex_color = None;
                 Ok(())
             })?,
         )?;
@@ -135,7 +139,9 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     // the colour form (`0x770360`) never writes it.
                     let same_path = matches!((&arg, &data.texture),
                     (Value::String(s), Some(cur)) if s.to_str().is_ok_and(|s| *s == **cur));
-                    let colour_form = matches!(&arg, Value::Number(_) | Value::Integer(_));
+                    // `lua_isnumber`: numeric strings (`"1"` from pfUI `strsplit`) take the
+                    // colour form, not a one-character path.
+                    let colour_form = is_lua_number(&arg);
                     if !same_path && !colour_form {
                         data.desaturated = false;
                     }
@@ -147,60 +153,59 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     // Both forms write the one texture slot (`+0xcc`), a file or an 8×8 solid, so
                     // each clears the other; neither touches the vertex colour (`+0xb8`), so a
                     // tint outlives its art.
-                    let loaded = match &arg {
-                        // "" clears, as nil does (stock `QuestLogFrame.lua:166`), and answers nil
-                        // like a failed load; the reference's answer for "" is untraced.
-                        Value::String(s) if s.to_str()?.is_empty() => {
-                            data.texture = None;
-                            data.fill = None;
-                            false
-                        }
-                        // Ask the probe before writing: on a failed load the reference returns 0
-                        // and keeps the texture it had (`0x770288`, `0x77028e`-`0x7702b2`). With
-                        // no probe the path is stored, though the answer is nil.
-                        Value::String(s) => {
-                            let path = s.to_str()?.to_string();
-                            drop(model);
-                            let resolvable = {
-                                let model = lua.app_data_ref::<Model>().expect("model");
-                                model
-                                    .texture_probe
-                                    .as_ref()
-                                    .is_none_or(|probe| probe(&path))
-                            };
-                            let mut model = lua.app_data_mut::<Model>().expect("model");
-                            let had_probe = model.texture_probe.is_some();
-                            if resolvable {
-                                let data = model.region_data.entry(rh).or_default();
-                                data.texture = Some(path);
-                                data.fill = None;
-                            }
-                            resolvable && had_probe
-                        }
+                    let loaded = if colour_form {
                         // The colour form, the only one to read the trailing three; a non-number
                         // there takes the default a missing one does.
-                        Value::Number(_) | Value::Integer(_) => {
-                            let chan = |v: &Value, dflt: f32| match v {
-                                Value::Number(_) | Value::Integer(_) => as_f32(v),
-                                Value::String(s) => s
-                                    .to_str()
-                                    .ok()
-                                    .and_then(|s| s.parse::<f32>().ok())
-                                    .unwrap_or(dflt),
-                                _ => dflt,
-                            };
-                            data.fill =
-                                Some([as_f32(&arg), chan(&g, 0.0), chan(&b, 0.0), chan(&a, 1.0)]);
-                            data.texture = None;
-                            true
+                        let chan = |v: &Value, dflt: f32| {
+                            if is_lua_number(v) {
+                                as_f32(v)
+                            } else {
+                                dflt
+                            }
+                        };
+                        data.fill =
+                            Some([as_f32(&arg), chan(&g, 0.0), chan(&b, 0.0), chan(&a, 1.0)]);
+                        data.texture = None;
+                        true
+                    } else {
+                        match &arg {
+                            // "" clears, as nil does (stock `QuestLogFrame.lua:166`), and answers nil
+                            // like a failed load; the reference's answer for "" is untraced.
+                            Value::String(s) if s.to_str()?.is_empty() => {
+                                data.texture = None;
+                                data.fill = None;
+                                false
+                            }
+                            // Ask the probe before writing: on a failed load the reference returns 0
+                            // and keeps the texture it had (`0x770288`, `0x77028e`-`0x7702b2`). With
+                            // no probe the path is stored, though the answer is nil.
+                            Value::String(s) => {
+                                let path = s.to_str()?.to_string();
+                                drop(model);
+                                let resolvable = {
+                                    let model = lua.app_data_ref::<Model>().expect("model");
+                                    model
+                                        .texture_probe
+                                        .as_ref()
+                                        .is_none_or(|probe| probe(&path))
+                                };
+                                let mut model = lua.app_data_mut::<Model>().expect("model");
+                                let had_probe = model.texture_probe.is_some();
+                                if resolvable {
+                                    let data = model.region_data.entry(rh).or_default();
+                                    data.texture = Some(path);
+                                    data.fill = None;
+                                }
+                                resolvable && had_probe
+                            }
+                            // nil clears, so the region draws nothing, and answers 1 (`0x79bb40`).
+                            Value::Nil => {
+                                data.texture = None;
+                                data.fill = None;
+                                true
+                            }
+                            _ => false,
                         }
-                        // nil clears, so the region draws nothing, and answers 1 (`0x79bb40`).
-                        Value::Nil => {
-                            data.texture = None;
-                            data.fill = None;
-                            true
-                        }
-                        _ => false,
                     };
                     (loaded, derived)
                 };

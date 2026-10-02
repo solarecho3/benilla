@@ -6,15 +6,16 @@
 //! `0x8` makes `SetCameraView` return early), with `[camera+0x40] = n × π/180`; removal restores
 //! `π/2` and unlocks. The Ornate Spyglass (item 5507, spell 12883) passes 15, a 6× zoom.
 //!
-//! The ratio is applied, not the degrees: `[camera+0x40]` defaults to 90°, while our [`CAM_FOVY`]
-//! is the effective vertical field of view, 45° against the reference's measured 44.1°.
+//! The ratio is applied, not the degrees: `[camera+0x40]` defaults to 90°, while our live
+//! vertical field is [`cam_fovy`] of the window's aspect (44.1° at 16:9, Hor+ on ultrawide).
 
 use bevy::camera::{PerspectiveProjection, Projection};
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 
 use crate::net::{ObjectStore, SelfPlayer};
 use crate::ui_action::Spells;
-use benilla_world::view::{WorldCamera, CAM_FOVY};
+use benilla_world::view::{aspect_or_16x9, cam_fovy, WorldCamera};
 
 /// `0x4c`, the aura name the reference's effect walk matches.
 const SPELL_AURA_FAR_SIGHT: u32 = 76;
@@ -37,13 +38,13 @@ impl ScopedView {
     }
 }
 
-/// Drives the projection from aura 76 in our own aura slots only, as the reference gates it: the
-/// aura field is public, so another player's spyglass must not zoom ours.
+/// Drives the zoom fraction from aura 76 in our own aura slots only, as the reference gates it:
+/// the aura field is public, so another player's spyglass must not zoom ours. The projection is
+/// [`stamp_world_fovy`].
 pub(super) fn apply_scoped_view(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     spells: Option<Res<Spells>>,
     mut scoped: ResMut<ScopedView>,
-    mut projections: Query<&mut Projection, With<WorldCamera>>,
 ) {
     let catalog = spells.as_ref().map(|s| &s.catalog);
     scoped.zoom = self_q
@@ -63,13 +64,29 @@ pub(super) fn apply_scoped_view(
         // A zero misc value is the reference's own "restore" argument, not a zero-width view.
         .filter(|&deg| deg > 0.0)
         .map(|deg| deg / REFERENCE_DEFAULT_DEGREES);
+}
 
-    let Ok(mut projection) = projections.single_mut() else {
-        return;
-    };
-    let want = CAM_FOVY * scoped.zoom.unwrap_or(1.0);
-    if let Projection::Perspective(PerspectiveProjection { fov, .. }) = &mut *projection {
-        if (*fov - want).abs() > f32::EPSILON {
+/// Stamp the world camera's vertical field from the live window aspect, times the spyglass
+/// fraction. Re-derived on resize so 21:9 does not keep a 16:9 spawn value, or a 45° default.
+pub(super) fn stamp_world_fovy(
+    scoped: Res<ScopedView>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut projections: Query<&mut Projection, With<WorldCamera>>,
+) {
+    let aspect = windows
+        .single()
+        .ok()
+        .map(|w| aspect_or_16x9(w.width(), w.height()))
+        .unwrap_or(16.0 / 9.0);
+    let want = cam_fovy(aspect) * scoped.zoom.unwrap_or(1.0);
+    for mut projection in &mut projections {
+        let Projection::Perspective(current) = projection.as_ref() else {
+            continue;
+        };
+        if (current.fov - want).abs() <= f32::EPSILON {
+            continue;
+        }
+        if let Projection::Perspective(PerspectiveProjection { fov, .. }) = &mut *projection {
             *fov = want;
         }
     }
@@ -84,21 +101,18 @@ mod tests {
         let scoped = ScopedView {
             zoom: Some(15.0 / REFERENCE_DEFAULT_DEGREES),
         };
-        let fov = CAM_FOVY * scoped.zoom.unwrap();
+        let base = cam_fovy(16.0 / 9.0);
+        let fov = base * scoped.zoom.unwrap();
         assert!(
-            (fov - CAM_FOVY / 6.0).abs() < 1e-6,
+            (fov - base / 6.0).abs() < 1e-6,
             "the spyglass is a 6x zoom off whatever our normal FOV is, not a literal 15 degrees"
-        );
-        assert!(
-            (fov.to_degrees() - 7.5).abs() < 1e-4,
-            "…which lands at 7.5 degrees vertical for our 45 degree default, not 15"
         );
         assert!(scoped.active());
 
         let none = ScopedView { zoom: None };
         assert_eq!(
-            CAM_FOVY * none.zoom.unwrap_or(1.0),
-            CAM_FOVY,
+            base * none.zoom.unwrap_or(1.0),
+            base,
             "unscoped restores OUR default, never the reference's stored 90"
         );
         assert!(!none.active());

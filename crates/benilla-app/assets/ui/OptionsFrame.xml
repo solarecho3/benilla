@@ -4,7 +4,8 @@
         window replaces the 1.12 four-panel family, which is much worse to use; the 1.12 frames
         still load, hidden, for addons. Every art byte is 1.12-native or a colour fill, so era
         names below cite geometry only. Hiding discards pending edits and Apply commits outright.
-        A slider shows the 1.12 range; an out-of-range value displays clamped, not written back.
+        A slider shows the 1.12 range except Terrain Distance (past 777 yd) and Environment
+        Detail (past High, 0..15); an out-of-range value displays clamped, not written back.
     -->
 
     <!-- The era's 14 and 20 white fonts, outside Fonts.xml's 1.12 set; MasterFont's shadow. -->
@@ -445,7 +446,7 @@
             },
             Audio = {
                 "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
-                "RowEnableMusic", "RowEnableAmbience", "RowEnableErrorSpeech",
+                "RowEnableMusic", "RowLoopMusic", "RowEnableAmbience", "RowEnableErrorSpeech",
                 "RowBackgroundSound",
             },
             Graphics = {
@@ -598,6 +599,14 @@
             "RowUiScale", "RowFarclip", "RowWorldDetail",
             [6] = "RowBrightness", [8] = "RowSpellDetail", [9] = "RowWeatherDensity",
         }
+
+        -- Deviation: Terrain Distance past the 1.12 777-yd cap, still on 177 + n*60
+        -- (`OptionsFrame.lua:26`): 177 + 18*60 = 1257. Environment Detail past High, matching
+        -- pfUI hdgraphic's 0..15 so the Graphics row does not need that addon to reach Ultra.
+        if OptionsFrameSliders then
+            OptionsFrameSliders[2].maxValue = 1257
+            OptionsFrameSliders[3].maxValue = 15
+        end
 
         -- SetMinMaxValues re-clamps and fires OnValueChanged, which must not write back.
         function BenillaOptionsSliderRow_Setup(row, min, max, step, fmt, stops)
@@ -1795,10 +1804,22 @@
                                                 this.soundQuirk = 1
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowEnableAmbience" inherits="BenillaOptionsCheckboxRowTemplate">
+                                        <!-- 1.12 SoundOptionsFrameCheckButton8: ENABLE_MUSIC_LOOPING. -->
+                                        <Frame name="$parentRowLoopMusic" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowEnableMusic" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableMusic" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "SoundZoneMusicNoDelay", "Loop Music",
+                                                    "OPTION_TOOLTIP_ENABLE_MUSIC_LOOPING")
+                                                this.soundQuirk = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowEnableAmbience" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowLoopMusic" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowLoopMusic" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "EnableAmbience", "Enable Ambience",
@@ -1879,11 +1900,14 @@
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "WorldDetail", "Environment Detail",
                                                     "OPTION_TOOLTIP_ENVIRONMENT_DETAIL")
-                                                -- Stop names from the era quality ladder.
+                                                -- Stop names from the era quality ladder, then
+                                                -- pfUI hdgraphic's 3..15 (Ultra at the top).
                                                 BenillaOptionsSliderRow_Setup(this, OptionsFrameSliders[3].minValue,
                                                     OptionsFrameSliders[3].maxValue,
                                                     OptionsFrameSliders[3].valueStep, nil,
-                                                    { "Low", "Medium", "High" })
+                                                    { "Low", "Medium", "High",
+                                                      "3", "4", "5", "6", "7", "8", "9",
+                                                      "10", "11", "12", "13", "14", "Ultra" })
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- On the CVar, as 1.12's slider 8 lands: there is no

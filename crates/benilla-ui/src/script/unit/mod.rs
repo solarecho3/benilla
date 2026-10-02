@@ -194,6 +194,11 @@ pub struct UnitState {
     /// (`0x516c50`, delegating to `CanAttack` `0x606980`) answers for both argument orders. Fed for
     /// `target`, `targettarget`, `npc` and the units a chain ends on; other tokens read false.
     pub can_attack: bool,
+    /// Whether the player can assist the unit, `UnitCanAssist("player", unit)` (`0x516bb0`,
+    /// `CanAssist` `0x6066f0`). Same argument-order rule as [`Self::can_attack`]. The player token
+    /// is true (the caster always assists himself); party tokens are true (same-faction players);
+    /// held units take the live predicate.
+    pub can_assist: bool,
     /// `UnitIsCorpse` (`0x5161c0`): the token names a `TYPEID_CORPSE` object, which a dead unit
     /// is not. No feed sets it.
     pub corpse_object: bool,

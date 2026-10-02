@@ -249,6 +249,12 @@ impl Plugin for PlayerPlugin {
                     .in_set(WorldStage::Input)
                     .before(control)
                     .in_set(crate::char_select::InWorldGated),
+            )
+            .add_systems(
+                Update,
+                // After the aura walk so a spyglass frame sees this frame's zoom; ungated so a
+                // resize while the world camera is covered still restamps the optic.
+                scoped_view::stamp_world_fovy.after(scoped_view::apply_scoped_view),
             );
         app.add_systems(
             Startup,

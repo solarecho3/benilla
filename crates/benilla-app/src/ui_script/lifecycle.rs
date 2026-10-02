@@ -474,6 +474,7 @@ pub(crate) fn seat_from_roster(
         sex,
         is_player: true,
         player_controlled: true,
+        can_assist: true,
         // AceDB-2.0 concatenates `UnitFactionGroup("player")` at file scope, where nil is an error.
         faction_group: crate::ui_unit::race_faction_group(row.race).map(str::to_string),
         ..Default::default()

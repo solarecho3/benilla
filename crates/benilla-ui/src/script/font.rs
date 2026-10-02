@@ -245,10 +245,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetFont",
         lua.create_function(
-            |lua, (this, file, height, flags): (Table, Value, Value, Option<String>)| {
+            |lua, (this, file, height, flags): (Table, Value, Value, Option<Value>)| {
                 // The argument gate the FontString and EditBox tables share (`0x79f210`); a
                 // missing argument raises (`0x87c69c`).
                 let (path, height) = super::font_block::set_font_args(&file, &height, "Font")?;
+                let flags = super::font_block::set_font_flags(lua, flags.as_ref());
                 let ok = !path.is_empty();
                 edit(lua, &this, |fo| {
                     if ok {
@@ -284,15 +285,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "SetTextColor",
         lua.create_function(
-            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
-                let (r, g, b) = (
-                    super::object::as_f32(&r),
-                    super::object::as_f32(&g),
-                    super::object::as_f32(&b),
-                );
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
                 edit(lua, &this, |fo| {
                     let keep = fo.color.map_or(1.0, |c| c[3]);
-                    fo.color = Some([r, g, b, a.unwrap_or(keep)]);
+                    fo.color = Some(super::object::color_rgba(&r, &g, &b, &a, keep));
                 })
             },
         )?,
@@ -325,17 +321,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetShadowColor",
         lua.create_function(
             // Shape C on r, g, b (`Font:SetShadowColor 0x79f730`): never raises.
-            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Option<f32>)| {
-                let (r, g, b) = (
-                    crate::script::object::as_f32(&r),
-                    crate::script::object::as_f32(&g),
-                    crate::script::object::as_f32(&b),
-                );
+            |lua, (this, r, g, b, a): (Table, Value, Value, Value, Value)| {
                 edit(lua, &this, |fo| {
                     let offset = fo.shadow.map_or([0.0, 0.0], |s| s.offset);
                     fo.shadow = Some(FontShadow {
                         offset,
-                        color: [r, g, b, a.unwrap_or(1.0)],
+                        color: crate::script::object::color_rgba(&r, &g, &b, &a, 1.0),
                     });
                 })
             },

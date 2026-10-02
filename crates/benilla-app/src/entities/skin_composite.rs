@@ -1,4 +1,4 @@
-//! Composited body skins, one 256² atlas per look. An arriving body's first composite runs off the
+//! Composited body skins, one atlas per look (256² stock, 512²/1024² on HD packs). An arriving body's first composite runs off the
 //! main thread: the reference's world composite is unforced, so its section loads poll and never
 //! block the frame (`0x44b430`), and it draws nothing of a unit whose first composite has not
 //! finished, its ShouldRender answering `0x477860(cc, 0)`'s result (`0x607e7c`). Only the forced
