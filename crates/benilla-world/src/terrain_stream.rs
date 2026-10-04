@@ -98,14 +98,20 @@ impl TerrainStreamer {
 }
 
 /// One loaded tile and everything it owns.
+#[derive(Default)]
 struct TileState {
     handle: Handle<AdtTile>,
-    /// The terrain root, spawned once the `AdtTile` loads, when its placements register too.
+    /// The terrain root, spawned once the `AdtTile` loads. Doodads and WMOs may still be
+    /// registering ([`Self::next_doodad`], [`Self::next_wmo`]).
     entity: Option<Entity>,
     /// The tile's one terrain material, shared by every cell.
     material: Option<Handle<TerrainMaterial>>,
     /// The index of the next cell (4×4 chunks) to furnish; cells land a few per frame while live.
     next_cell: usize,
+    /// Next doodad in the ADT list to register; `adt.doodads.len()` when that pass is done.
+    next_doodad: usize,
+    /// Next WMO in the ADT list to register; `adt.wmos.len()` when that pass is done.
+    next_wmo: usize,
     /// Every cell is up: the residency bit the loading screen counts.
     furnished: bool,
     /// The uniqueIds of the placements this tile references, released when it unloads.
@@ -678,121 +684,133 @@ fn stream_terrain(
                 TileState {
                     handle: asset_server
                         .load(format!("mpq://World/Maps/{dir}/{dir}_{tx}_{ty}.adt")),
-                    entity: None,
-                    material: None,
-                    next_cell: 0,
-                    furnished: false,
-                    placements: Vec::new(),
-                    liquid: Vec::new(),
-                    wall: None,
-                    clutter: Vec::new(),
-                    welds: Vec::new(),
-                    merged: Vec::new(),
+                    ..Default::default()
                 },
             );
         }
     }
 
     // Spawn loaded tiles within the frame's budget. The material binds the shared light buffer,
-    // so a new tile is lit and fogged on its first frame.
+    // so a new tile is lit and fogged on its first frame. Doodad and WMO records resume from
+    // `next_doodad` / `next_wmo`; the 4 ms limit is checked before each record while live.
     let tile_deadline = Instant::now() + SPAWN_BUDGET;
-    for (&(tx, ty), tile) in state.tiles.iter_mut() {
-        if tile.entity.is_some() {
+    let live = focus.paced;
+    let mut pending: Vec<(i32, (i32, i32))> = state
+        .tiles
+        .iter()
+        .filter_map(|(&(tx, ty), tile)| {
+            let adt = tiles.get(&tile.handle)?;
+            let need = tile.entity.is_none()
+                || tile.next_doodad < adt.doodads.len()
+                || tile.next_wmo < adt.wmos.len();
+            need.then_some(((tx - cx).abs().max((ty - cy).abs()), (tx, ty)))
+        })
+        .collect();
+    pending.sort_unstable();
+    'tiles: for (_, (tx, ty)) in pending {
+        let Some(tile) = state.tiles.get_mut(&(tx, ty)) else {
             continue;
-        }
-        let Some(adt) = tiles.get(&tile.handle) else {
+        };
+        let handle = tile.handle.clone();
+        let Some(adt) = tiles.get(&handle) else {
             continue; // not loaded yet, or missing
         };
-        let material = materials.add(ExtendedMaterial {
-            base: terrain_base_material(),
-            extension: TerrainExtension {
-                layer_array: adt.layer_array.clone(),
-                alpha_array: adt.alpha_array.clone(),
-                shadow_array: adt.shadow_array.clone(),
-                params: Vec4::new(benilla_formats::TERRAIN_LAYER_TILES, 0.0, 0.0, 0.0),
-                light_buf: shared_light.0.clone(),
-            },
-        });
-        // One static trimesh per tile from the drawn chunks, built off-thread, riding the root.
-        let collider_data = terrain_collider_data(&adt.chunks);
-        // The impassable-chunk fences are a second collider, on the walk layer only: the reference
-        // emits them into the movement box gather alone, never its segment and ray path.
-        let wall_data = impassable_wall_data(&adt.chunks);
-        // The root draws nothing: it carries the collider and surface roles, and its cells of
-        // 4×4 chunks are children, a unit small enough for the exterior and frustum culls.
-        // `furnish_tile_cells` spawns them a few per frame; the root keeps the visibility chain.
-        let mut tile_ent = commands.spawn((Transform::IDENTITY, Visibility::default()));
-        tile_ent.vis_chain_only();
-        if let Some((verts, tris)) = collider_data {
-            // Terrain takes the selection ring and clamps the pick (the reference's world trace).
-            tile_ent.insert((
-                PendingCollider::new(build_collider_task(verts, tris), None, true),
-                GroundDecalSurface,
-                PickOccluder,
-            ));
-        }
-        tile.entity = Some(tile_ent.id());
-        tile.wall = wall_data.map(|(verts, tris)| {
-            commands
-                .spawn(PendingCollider::new(
-                    build_collider_task(verts, tris),
-                    Some(walk_layers()),
-                    true,
-                ))
-                .id()
-        });
-        tile.material = Some(material);
-        activity.tiles_spawned += 1;
+        if tile.entity.is_none() {
+            let material = materials.add(ExtendedMaterial {
+                base: terrain_base_material(),
+                extension: TerrainExtension {
+                    layer_array: adt.layer_array.clone(),
+                    alpha_array: adt.alpha_array.clone(),
+                    shadow_array: adt.shadow_array.clone(),
+                    params: Vec4::new(benilla_formats::TERRAIN_LAYER_TILES, 0.0, 0.0, 0.0),
+                    light_buf: shared_light.0.clone(),
+                },
+            });
+            // One static trimesh per tile from the drawn chunks, built off-thread, riding the root.
+            let collider_data = terrain_collider_data(&adt.chunks);
+            // The impassable-chunk fences are a second collider, on the walk layer only: the
+            // reference emits them into the movement box gather alone, never its segment and ray
+            // path.
+            let wall_data = impassable_wall_data(&adt.chunks);
+            // The root draws nothing: it carries the collider and surface roles, and its cells of
+            // 4×4 chunks are children, a unit small enough for the exterior and frustum culls.
+            // `furnish_tile_cells` spawns them a few per frame; the root keeps the visibility chain.
+            let mut tile_ent = commands.spawn((Transform::IDENTITY, Visibility::default()));
+            tile_ent.vis_chain_only();
+            if let Some((verts, tris)) = collider_data {
+                // Terrain takes the selection ring and clamps the pick (the reference's world
+                // trace).
+                tile_ent.insert((
+                    PendingCollider::new(build_collider_task(verts, tris), None, true),
+                    GroundDecalSurface,
+                    PickOccluder,
+                ));
+            }
+            tile.entity = Some(tile_ent.id());
+            tile.wall = wall_data.map(|(verts, tris)| {
+                commands
+                    .spawn(PendingCollider::new(
+                        build_collider_task(verts, tris),
+                        Some(walk_layers()),
+                        true,
+                    ))
+                    .id()
+            });
+            tile.material = Some(material);
+            activity.tiles_spawned += 1;
 
-        // Placements register by uniqueId; their ground shade resolves at spawn by a global lookup,
-        // since a doodad's origin may lie on another tile.
-        for d in &adt.doodads {
-            register_doodad(placements, &asset_server, d, (tx, ty));
-            tile.placements.push(d.unique_id);
-        }
-        for w in &adt.wmos {
-            register_wmo(placements, &asset_server, w);
-            tile.placements.push(w.unique_id);
-        }
-
-        let mut liquid_ents = Vec::new();
-        spawn_liquids(
-            &mut commands,
-            adt.chunks.iter().flat_map(|c| c.liquids.iter()),
-            liquid_assets.as_deref(),
-            &mut meshes,
-            &mut liquid_ents,
-        );
-        tile.liquid = liquid_ents;
-
-        // Ground clutter per chunk, meshed lazily within ~70 yd by `stream_chunk_clutter`.
-        if let (Some(clutter), Some(clutter_cfg)) = (clutter.as_ref(), clutter_cfg.as_ref()) {
-            let mut clutter_ents = Vec::new();
-            scatter_tile_clutter(
+            let mut liquid_ents = Vec::new();
+            spawn_liquids(
                 &mut commands,
-                &adt.chunks,
-                tx as u32,
-                ty as u32,
-                &clutter.catalog,
-                clutter_cfg.density,
-                &mut clutter_ents,
+                adt.chunks.iter().flat_map(|c| c.liquids.iter()),
+                liquid_assets.as_deref(),
+                &mut meshes,
+                &mut liquid_ents,
             );
-            tile.clutter = clutter_ents;
+            tile.liquid = liquid_ents;
+
+            // Ground clutter per chunk, meshed lazily within ~70 yd by `stream_chunk_clutter`.
+            if let (Some(clutter), Some(clutter_cfg)) = (clutter.as_ref(), clutter_cfg.as_ref()) {
+                let mut clutter_ents = Vec::new();
+                scatter_tile_clutter(
+                    &mut commands,
+                    &adt.chunks,
+                    tx as u32,
+                    ty as u32,
+                    &clutter.catalog,
+                    clutter_cfg.density,
+                    &mut clutter_ents,
+                );
+                tile.clutter = clutter_ents;
+            }
+
+            if live && Instant::now() >= tile_deadline {
+                break 'tiles;
+            }
         }
 
-        // Past the budget the rest waits a frame; the `entity` guard above makes this re-entrant.
-        if Instant::now() >= tile_deadline {
-            break;
+        if register_tile_records(
+            tile,
+            &adt.doodads,
+            &adt.wmos,
+            placements,
+            &asset_server,
+            (tx, ty),
+            live.then_some(tile_deadline),
+        ) {
+            break 'tiles;
         }
     }
 
     // Publish residency; the pacing edge is read and advanced once per frame.
     state.settled = stale_empty
         && fresh_empty
-        && state
-            .tiles
-            .values()
-            .all(|t| t.entity.is_some() && t.furnished);
+        && state.tiles.values().all(|t| {
+            let records_done = tiles.get(&t.handle).is_some_and(|adt| {
+                t.next_doodad >= adt.doodads.len() && t.next_wmo >= adt.wmos.len()
+            });
+            t.entity.is_some() && t.furnished && records_done
+        });
     let was_paced = std::mem::replace(&mut state.was_paced, focus.paced);
     if let Some(p) = load_progress.as_mut() {
         p.focus_tile = Some((cx, cy));
@@ -894,6 +912,40 @@ fn stream_terrain(
 fn tile_drop_disabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("WOW_NO_TILE_DROP").is_some())
+}
+
+/// Register doodads then WMOs from the tile's remaining indices. Returns true when `deadline`
+/// stopped the pass; the next frame continues at [`TileState::next_doodad`] /
+/// [`TileState::next_wmo`]. A second pass does not increment `refs` on a record already in
+/// [`TileState::placements`].
+fn register_tile_records(
+    tile: &mut TileState,
+    doodads: &[Doodad],
+    wmos: &[WmoInstance],
+    placements: &mut Placements,
+    asset_server: &AssetServer,
+    tile_xy: (i32, i32),
+    deadline: Option<Instant>,
+) -> bool {
+    while tile.next_doodad < doodads.len() {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return true;
+        }
+        let d = &doodads[tile.next_doodad];
+        register_doodad(placements, asset_server, d, tile_xy);
+        tile.placements.push(d.unique_id);
+        tile.next_doodad += 1;
+    }
+    while tile.next_wmo < wmos.len() {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return true;
+        }
+        let w = &wmos[tile.next_wmo];
+        register_wmo(placements, asset_server, w);
+        tile.placements.push(w.unique_id);
+        tile.next_wmo += 1;
+    }
+    false
 }
 
 /// Register one M2 doodad placement, or bump its refcount if already known.
@@ -1309,17 +1361,8 @@ mod straddler_tests {
 
     fn tile_listing(uids: &[u32]) -> TileState {
         TileState {
-            handle: Default::default(),
-            entity: None,
-            material: None,
-            next_cell: 0,
-            furnished: false,
             placements: uids.to_vec(),
-            liquid: Vec::new(),
-            wall: None,
-            clutter: Vec::new(),
-            welds: Vec::new(),
-            merged: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1418,5 +1461,121 @@ mod straddler_tests {
         assert!(!p8.spawned);
         assert!(world.get_entity(e1).is_ok());
         assert!(world.get_entity(e2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod record_pace_tests {
+    use super::*;
+    use bevy::asset::AssetPlugin;
+
+    fn doodad(id: u32) -> Doodad {
+        Doodad {
+            model: "World\\test.mdx".into(),
+            position: [0.0; 3],
+            rotation: [0.0; 3],
+            scale: 1.0,
+            unique_id: id,
+        }
+    }
+
+    fn wmo(id: u32) -> WmoInstance {
+        WmoInstance {
+            model: "World\\test.wmo".into(),
+            position: [0.0; 3],
+            rotation: [0.0; 3],
+            unique_id: id,
+            doodad_set: 0,
+            name_set: 0,
+        }
+    }
+
+    fn asset_server() -> (App, AssetServer) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_asset::<M2Model>();
+        app.init_asset::<WmoModel>();
+        let server = app.world().resource::<AssetServer>().clone();
+        (app, server)
+    }
+
+    #[test]
+    fn a_full_pass_registers_each_record_once() {
+        let (_app, server) = asset_server();
+        let mut tile = TileState::default();
+        let mut placements = Placements::default();
+        let doodads = [doodad(1), doodad(2)];
+        let wmos = [wmo(3)];
+        assert!(
+            !register_tile_records(
+                &mut tile,
+                &doodads,
+                &wmos,
+                &mut placements,
+                &server,
+                (0, 0),
+                None,
+            ),
+            "no deadline, the list completes"
+        );
+        assert_eq!((tile.next_doodad, tile.next_wmo), (2, 1));
+        assert_eq!(tile.placements, vec![1, 2, 3]);
+        assert_eq!(placements.by_id.len(), 3);
+        assert_eq!(placements.pending_spawns, 3);
+        assert_eq!(placements.by_id[&1].refs, 1);
+
+        assert!(!register_tile_records(
+            &mut tile,
+            &doodads,
+            &wmos,
+            &mut placements,
+            &server,
+            (0, 0),
+            None,
+        ));
+        assert_eq!(
+            placements.by_id[&1].refs, 1,
+            "a second pass must not bump refs"
+        );
+        assert_eq!(placements.pending_spawns, 3);
+        assert_eq!(tile.placements, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn an_expired_budget_stops_before_a_record_and_resumes() {
+        let (_app, server) = asset_server();
+        let mut tile = TileState::default();
+        let mut placements = Placements::default();
+        let doodads = [doodad(1), doodad(2), doodad(3)];
+        let wmos: [WmoInstance; 0] = [];
+        let expired = Some(Instant::now() - Duration::from_secs(1));
+        assert!(register_tile_records(
+            &mut tile,
+            &doodads,
+            &wmos,
+            &mut placements,
+            &server,
+            (0, 0),
+            expired,
+        ));
+        assert_eq!(tile.next_doodad, 0);
+        assert!(placements.by_id.is_empty());
+
+        register_doodad(&mut placements, &server, &doodads[0], (0, 0));
+        tile.placements.push(1);
+        tile.next_doodad = 1;
+        assert!(!register_tile_records(
+            &mut tile,
+            &doodads,
+            &wmos,
+            &mut placements,
+            &server,
+            (0, 0),
+            None,
+        ));
+        assert_eq!(tile.next_doodad, 3);
+        assert_eq!(tile.placements, vec![1, 2, 3]);
+        assert_eq!(placements.by_id[&1].refs, 1);
+        assert_eq!(placements.pending_spawns, 3);
     }
 }
