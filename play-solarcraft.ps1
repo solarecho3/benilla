@@ -61,6 +61,43 @@ Wait-Listen 8085 180 "world" "mangosd"
 $env:WOW_DATA = Join-Path $client "Data"
 $env:WOW_HOST = "127.0.0.1"
 # Hor+ is the default. WOW_FOV=reference uses 1.12's shrinking vertical field.
+
+# Hitch telemetry: streamer CSV, 1 Hz FPS/GPU journal, live shader compiles, 5 s
+# frame-delta watch. Farclip and WorldDetail stay as in config.toml. Override any
+# of these by setting the env var before Play Benilla.bat.
+$diag = Join-Path $benilla "benilla-config\Diagnostics"
+New-Item -ItemType Directory -Force -Path $diag | Out-Null
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+if (-not $env:WOW_STREAM_TRACE) { $env:WOW_STREAM_TRACE = Join-Path $diag "stream-$stamp.csv" }
+if (-not $env:WOW_FPS_JOURNAL) { $env:WOW_FPS_JOURNAL = Join-Path $diag "fps-$stamp.csv" }
+if (-not $env:WOW_PIPE_TRACE) { $env:WOW_PIPE_TRACE = Join-Path $diag "pipe-$stamp.txt" }
+if (-not $env:WOW_STALL) { $env:WOW_STALL = "0" }
+if (-not $env:WOW_PERF_HUD) { $env:WOW_PERF_HUD = "1" }
+# WOW_FPS_JOURNAL matches the engine's WOW_FPS_ prefix, which otherwise forces a
+# 640x360 windowed probe (gxWindow ignored). WOW_BG=0 keeps a normal play window.
+if (-not $env:WOW_BG) { $env:WOW_BG = "0" }
+$log = Join-Path $diag "benilla-$stamp.log"
+
 Set-Location $benilla
 Write-Host "Launching benilla (release) at native desktop size"
-cargo run --release -p benilla
+Write-Host "Telemetry $stamp -> $diag"
+Write-Host "  stream  $env:WOW_STREAM_TRACE"
+Write-Host "  fps     $env:WOW_FPS_JOURNAL"
+Write-Host "  pipe    $env:WOW_PIPE_TRACE"
+Write-Host "  stall   WOW_STALL=$env:WOW_STALL (monitor only)"
+Write-Host "  window  WOW_BG=$env:WOW_BG (0 = normal borderless play)"
+Write-Host "  log     $log"
+# PowerShell 5.1 + $ErrorActionPreference Stop treats cargo's stderr progress
+# ("Finished", "Running") as NativeCommandError and aborts before the exe starts.
+# Merge streams in cmd so Tee-Object only sees stdout.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    & cmd.exe /c "cargo run --release -p benilla 2>&1" | Tee-Object -FilePath $log
+    $code = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $prevEap
+}
+if ($code -ne 0) {
+    throw "benilla exited with code $code"
+}
