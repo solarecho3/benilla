@@ -3,15 +3,20 @@
 //! description's `$` tokens resolve as a tooltip's do. An enchant is an item-targeted cast
 //! (`Targets = 0x10`) whose pick is the ordinary targeting cursor ([`crate::spell::targeting`]).
 
+use std::collections::BTreeSet;
+
 use bevy::prelude::*;
 
 use benilla_formats::{
-    SPELL_ATTR_IS_TRADESKILL, SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_ENCHANT_ITEM,
-    SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_LEARN_SPELL,
+    SkillLineCatalog, SpellCatalog, SpellDisplay, SPELL_ATTR_IS_TRADESKILL,
+    SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY,
+    SPELL_EFFECT_LEARN_PET_SPELL, SPELL_EFFECT_LEARN_SPELL,
 };
 use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
 use benilla_protocol::{SessionEvent, SessionEventKind};
-use benilla_ui::script::{CraftReagent, CraftRecipe, CraftState, CraftTooltip, UiScript};
+use benilla_ui::script::{
+    CraftReagent, CraftRecipe, CraftState, CraftTooltip, TradeSkillDifficulty, UiScript,
+};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
@@ -19,10 +24,16 @@ use crate::net::{NetCommands, NetHandlerApp, ObjectStore, Objects, SelfPlayer};
 use crate::spell::{cast_target, CastCommit, CastLadder};
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_items::{count_of, item_icon, InventoryScope};
+use crate::ui_pet::PetBar;
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
 use crate::ui_tradeskill::SpellFocus;
 use crate::ui_unit::UnitFeed;
+
+/// Beast Training's craft type, the opener's `EffectMiscValue[0]` (spell 5149).
+const CRAFT_TYPE_BEAST_TRAINING: u32 = 1;
+/// Cap on a rank-chain walk; matches `SkillLineCatalog`'s own bound.
+const MAX_RANK_CHAIN: usize = 16;
 
 /// The open Craft window, client-local. A nonzero opener `EffectMiscValue[0]` routes here
 /// (`Spell_C::TryCast` `0x6e4b60`) and is the craft type (1 Beast Training, 3 Enchanting) the
@@ -75,6 +86,81 @@ fn craft_icon(d: &benilla_formats::SpellDisplay) -> Option<String> {
     d.icon.clone()
 }
 
+/// The pet's known spell ids, from `SMSG_PET_SPELLS`' book and bar. Empty with no pet out.
+fn pet_known_spells(bar: Option<&PetBar>) -> BTreeSet<u32> {
+    let Some(bar) = bar.filter(|b| b.has_bar()) else {
+        return BTreeSet::new();
+    };
+    bar.spells
+        .spells
+        .iter()
+        .chain(bar.spells.bar.iter())
+        .filter(|e| e.is_spell())
+        .map(|e| e.action())
+        .filter(|&id| id != 0)
+        .collect()
+}
+
+/// The ability a Beast Training recipe teaches. Shipped rows use `LEARN_SPELL` (Growl 1853 →
+/// 2649); `LEARN_PET_SPELL` is accepted in any slot the way the trainer's icon is.
+fn taught_pet_spell(d: &SpellDisplay) -> Option<u32> {
+    (0..3).find_map(|i| {
+        matches!(
+            d.effects[i],
+            SPELL_EFFECT_LEARN_SPELL | SPELL_EFFECT_LEARN_PET_SPELL
+        )
+        .then_some(d.effect_trigger_spell[i])
+        .filter(|&t| t != 0)
+    })
+}
+
+/// Whether the pet already knows this recipe's taught spell, or a higher rank of it.
+fn recipe_already_known(
+    recipe_id: u32,
+    d: &SpellDisplay,
+    spells: &SpellCatalog,
+    skill_lines: &SkillLineCatalog,
+    pet_known: &BTreeSet<u32>,
+) -> bool {
+    let known = |id: u32| pet_known.contains(&id) || skill_lines.higher_rank_known(id, pet_known);
+    if taught_pet_spell(d).is_some_and(known) || known(recipe_id) {
+        return true;
+    }
+    let mut cur = recipe_id;
+    for _ in 0..MAX_RANK_CHAIN {
+        let Some(next) = skill_lines.rank_successor(cur) else {
+            break;
+        };
+        if known(next) {
+            return true;
+        }
+        if let Some(nd) = spells.get(next) {
+            if taught_pet_spell(nd).is_some_and(known) {
+                return true;
+            }
+        }
+        cur = next;
+    }
+    false
+}
+
+/// Beast Training's `GetCraftInfo` type: `"used"` once the pet knows the ability (or a higher
+/// rank), `"none"` while it can still learn it. Skill-rank bands would paint every row gray
+/// (`rank` 0 ≥ `trivialHigh` 0).
+fn beast_training_difficulty(
+    recipe_id: u32,
+    d: &SpellDisplay,
+    spells: &SpellCatalog,
+    skill_lines: &SkillLineCatalog,
+    pet_known: &BTreeSet<u32>,
+) -> TradeSkillDifficulty {
+    if recipe_already_known(recipe_id, d, spells, skill_lines, pet_known) {
+        TradeSkillDifficulty::Used
+    } else {
+        TradeSkillDifficulty::None
+    }
+}
+
 /// The tooltip (`SetCraftSpell` `0x533e90`), off the recipe's own effects: the first slot that
 /// is `LEARN_SPELL` names its trigger spell, unchecked, or `CREATE_ITEM` its item; otherwise the
 /// recipe itself, as for every enchant. Unlike the trainer's law it never tests
@@ -101,6 +187,7 @@ fn feed_craft(
     skill_lines: Option<Res<SkillLines>>,
     focus: Option<Res<SpellFocus>>,
     icons: Option<Res<ItemDisplays>>,
+    bar: Option<Res<PetBar>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
     objects: Objects,
     items: Res<Items>,
@@ -117,6 +204,7 @@ fn feed_craft(
         let spells = spells.as_deref()?;
         let skill_lines = skill_lines.as_deref()?;
         let store = self_store.single().ok()?;
+        let pet_known = pet_known_spells(bar.as_deref());
         let (rank, max_rank, bonus) = skill_rank(store, line);
         let effective = rank.saturating_add_signed(bonus);
         let name = skill_lines
@@ -199,15 +287,22 @@ fn feed_craft(
                     SPELL_EFFECT_ENCHANT_ITEM | SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY
                 );
                 let icon = craft_icon(d);
+                let difficulty = if craft_type == CRAFT_TYPE_BEAST_TRAINING {
+                    beast_training_difficulty(
+                        s,
+                        d,
+                        &spells.catalog,
+                        &skill_lines.catalog,
+                        &pet_known,
+                    )
+                } else {
+                    crate::ui_tradeskill::difficulty(effective, sla.trivial_low, sla.trivial_high)
+                };
                 Some(CraftRecipe {
                     spell_id: s,
                     name: d.name.clone(),
                     sub_name: d.rank.clone().unwrap_or_default(),
-                    difficulty: crate::ui_tradeskill::difficulty(
-                        effective,
-                        sla.trivial_low,
-                        sla.trivial_high,
-                    ),
+                    difficulty,
                     num_available,
                     icon,
                     description: d
@@ -359,5 +454,87 @@ mod tests {
 
         let open = app.world().resource::<CraftOpen>();
         assert_eq!((open.line, open.craft_type), (None, 0));
+    }
+
+    fn growl_recipe(id: u32, taught: u32) -> SpellDisplay {
+        SpellDisplay {
+            id,
+            name: "Growl".into(),
+            effects: [SPELL_EFFECT_LEARN_PET_SPELL, 0, 0],
+            effect_trigger_spell: [taught, 0, 0],
+            ..Default::default()
+        }
+    }
+
+    fn sla(forward: u32) -> benilla_formats::SlaInfo {
+        benilla_formats::SlaInfo {
+            skill_id: 261,
+            req_skill_value: 1,
+            forward_spell_id: forward,
+            trivial_low: 0,
+            trivial_high: 0,
+        }
+    }
+
+    #[test]
+    fn beast_training_marks_known_and_superseded_ranks_used() {
+        // Hunter recipes 10 → 11 → 12 teach pet spells 100, 101, 102.
+        let spells = SpellCatalog::from_displays(
+            [
+                (10, growl_recipe(10, 100)),
+                (11, growl_recipe(11, 101)),
+                (12, growl_recipe(12, 102)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let skill_lines =
+            SkillLineCatalog::from_abilities([(10, sla(11)), (11, sla(12)), (12, sla(0))]);
+        let d10 = spells.get(10).unwrap();
+        let d12 = spells.get(12).unwrap();
+
+        assert_eq!(
+            beast_training_difficulty(10, d10, &spells, &skill_lines, &BTreeSet::new()),
+            TradeSkillDifficulty::None,
+            "unknown to the pet is learnable"
+        );
+        assert_eq!(
+            beast_training_difficulty(12, d12, &spells, &skill_lines, &BTreeSet::from([102])),
+            TradeSkillDifficulty::Used,
+            "the taught pet spell is known"
+        );
+        assert_eq!(
+            beast_training_difficulty(10, d10, &spells, &skill_lines, &BTreeSet::from([102])),
+            TradeSkillDifficulty::Used,
+            "a higher rank of the same ability is already known"
+        );
+    }
+
+    #[test]
+    fn growl_rank_1_teaches_a_pet_spell_on_the_real_dbc() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let spells = benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc");
+        let skills = benilla_formats::load_skill_line_catalog(&mut chain).expect("SLA");
+        let d = spells.get(1853).expect("Growl Rank 1 recipe");
+        let taught = taught_pet_spell(d).expect("Growl Rank 1 LEARN_SPELL");
+        assert_eq!(taught, 2649, "1853 teaches the pet's Growl");
+        assert_eq!(
+            beast_training_difficulty(1853, d, &spells, &skills, &BTreeSet::from([taught])),
+            TradeSkillDifficulty::Used
+        );
+        assert_eq!(
+            beast_training_difficulty(1853, d, &spells, &skills, &BTreeSet::new()),
+            TradeSkillDifficulty::None
+        );
+        let d3 = spells.get(14923).expect("Growl Rank 3 recipe");
+        let taught3 = taught_pet_spell(d3).expect("Growl Rank 3 LEARN_SPELL");
+        assert_ne!(taught3, taught);
+        assert_eq!(
+            beast_training_difficulty(1853, d, &spells, &skills, &BTreeSet::from([taught3])),
+            TradeSkillDifficulty::Used,
+            "knowing Rank 3 marks Rank 1 used along the SLA chain {:?}",
+            skills.rank_successor(1853)
+        );
     }
 }

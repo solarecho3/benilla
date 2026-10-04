@@ -275,6 +275,27 @@ fn row_at(model: &Model, index: usize) -> Option<MailInboxRow> {
         .cloned()
 }
 
+/// `GetInboxHeaderInfo`'s miss: always thirteen values. `MailFrame.lua:399` does `CODAmount > 0`
+/// after `MAIL_INBOX_UPDATE` even when `InboxFrame.openMailID` is `0` (truthy in Lua 5.1), so
+/// money, COD and daysLeft have to be numbers.
+fn header_miss() -> MultiValue {
+    MultiValue::from_vec(vec![
+        Value::Nil,         // packageIcon
+        Value::Nil,         // stationeryIcon
+        Value::Nil,         // sender
+        Value::Nil,         // subject
+        Value::Integer(0),  // money
+        Value::Integer(0),  // CODAmount
+        Value::Number(0.0), // daysLeft
+        Value::Nil,         // hasItem
+        Value::Nil,         // wasRead
+        Value::Nil,         // wasReturned
+        Value::Nil,         // textCreated
+        Value::Nil,         // canReply
+        Value::Nil,         // isGM
+    ])
+}
+
 /// Register the mail globals.
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
@@ -287,7 +308,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetInboxHeaderInfo(index): the 13 values `MailFrame.lua:105` reads; nil out of range.
+    // GetInboxHeaderInfo(index): the 13 values `MailFrame.lua:105` reads. A miss is still
+    // thirteen values (`MailFrame.lua:399` compares `CODAmount > 0` with no nil guard).
     g.set(
         "GetInboxHeaderInfo",
         lua.create_function(|lua, index: usize| {
@@ -296,7 +318,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 row_at(&model, index)
             };
             let Some(r) = row else {
-                return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                return Ok(header_miss());
             };
             let opt_str = |s: &Option<String>| -> mlua::Result<Value> {
                 Ok(match s {
@@ -999,8 +1021,19 @@ mod tests {
     fn inbox_header_reads_the_reference_tuple() {
         let mut s = UiScript::new().unwrap();
         assert_eq!(s.eval::<i64>("return GetInboxNumItems()").unwrap(), 0);
+        assert_eq!(
+            s.arity("GetInboxHeaderInfo(1)").unwrap(),
+            13,
+            "a miss is still thirteen values"
+        );
         assert!(s
             .eval::<bool>("return GetInboxHeaderInfo(1) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>(
+                "local pkg, sta, sender, subj, money, cod, days = GetInboxHeaderInfo(0)\n\
+                 return pkg == nil and money == 0 and cod == 0 and days == 0",
+            )
             .unwrap());
 
         s.set_mail(Some(state()));

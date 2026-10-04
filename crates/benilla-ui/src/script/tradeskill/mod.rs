@@ -19,6 +19,10 @@ pub(crate) use view::recipe_at;
 
 /// A recipe's difficulty band, computed app-side: gray at or above trivialHigh, green from the
 /// low/high midpoint, yellow from trivialLow, orange below (`0x4fca20`).
+///
+/// Beast Training does not band on skill rank. `GetCraftInfo` answers `"none"` (green, the pet
+/// can still learn it) or `"used"` (gray, already known); `Blizzard_CraftUI.lua` colours those
+/// keys and disables Train on `"used"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TradeSkillDifficulty {
     /// Orange: a near-certain skill-up.
@@ -29,28 +33,51 @@ pub enum TradeSkillDifficulty {
     Easy,
     /// Gray: no skill-up.
     Trivial,
+    /// Beast Training: the pet can learn this. `CraftTypeColor["none"]` is green, and Train stays
+    /// enabled (`Blizzard_CraftUI.lua:6-13`, `:365-367`).
+    None,
+    /// Beast Training: the pet already knows this (or a higher rank). Gray, and Train is
+    /// disabled (`craftType == "used"`).
+    Used,
 }
 
 impl TradeSkillDifficulty {
-    /// A recipe row's `type` in `GetTradeSkillInfo`, a `TradeSkillTypeColor` key
-    /// (`Blizzard_TradeSkillUI.lua:7-10`).
+    /// A recipe row's `type` in `GetTradeSkillInfo` / `GetCraftInfo`, a `TradeSkillTypeColor` or
+    /// `CraftTypeColor` key (`Blizzard_TradeSkillUI.lua:7-10`, `Blizzard_CraftUI.lua:6-13`).
     pub fn as_str(self) -> &'static str {
         match self {
             TradeSkillDifficulty::Optimal => "optimal",
             TradeSkillDifficulty::Medium => "medium",
             TradeSkillDifficulty::Easy => "easy",
             TradeSkillDifficulty::Trivial => "trivial",
+            TradeSkillDifficulty::None => "none",
+            TradeSkillDifficulty::Used => "used",
         }
     }
 
-    /// The tier byte recipes sort by, ascending (`0x4fd380`). The Craft window's comparators key on
-    /// the same order (`row[+0xc]`, shifted by one for a "none" tier), so it shares this.
+    /// The TradeSkill window's sort byte (`0x4fd380`): orange through gray, 0..3.
     pub(crate) fn tier(self) -> u8 {
         match self {
             TradeSkillDifficulty::Optimal => 0,
             TradeSkillDifficulty::Medium => 1,
             TradeSkillDifficulty::Easy => 2,
             TradeSkillDifficulty::Trivial => 3,
+            // Unreachable in the TradeSkill book; sit with gray if they ever leak in.
+            TradeSkillDifficulty::None => 0,
+            TradeSkillDifficulty::Used => 3,
+        }
+    }
+
+    /// The Craft window's sort byte (`row[+0xc]`): `"none"` is tier 0 and the four skill-up bands
+    /// shift up by one, so learnable Beast Training rows sort above already-known `"used"` rows.
+    pub(crate) fn craft_tier(self) -> u8 {
+        match self {
+            TradeSkillDifficulty::None => 0,
+            TradeSkillDifficulty::Optimal => 1,
+            TradeSkillDifficulty::Medium => 2,
+            TradeSkillDifficulty::Easy => 3,
+            TradeSkillDifficulty::Trivial => 4,
+            TradeSkillDifficulty::Used => 5,
         }
     }
 }

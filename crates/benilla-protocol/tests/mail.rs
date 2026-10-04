@@ -295,6 +295,34 @@ fn send_mail_result_wire() {
         }
         other => panic!("send mail result (item taken), got {}", other.name()),
     }
+
+    // CMaNGOS writes the item pair on every ITEM_TAKEN that is not EQUIP_ERROR, including
+    // INTERNAL_ERROR (zeros). Leaving those 8 bytes unread is the live trailing-bytes warning.
+    let mut failed = 4u32.to_le_bytes().to_vec();
+    failed.extend_from_slice(&mail_action::ITEM_TAKEN.to_le_bytes());
+    failed.extend_from_slice(&mail_error::INTERNAL_ERROR.to_le_bytes());
+    failed.extend_from_slice(&0u32.to_le_bytes());
+    failed.extend_from_slice(&0u32.to_le_bytes());
+    let (packet, tail) =
+        messages::parse_server_with_tail(messages::opcode::SMSG_SEND_MAIL_RESULT, &failed).unwrap();
+    assert_eq!(tail, 0, "the item pair is consumed on a failed take");
+    match packet {
+        ServerPacket::SendMailResult {
+            mail_id,
+            action,
+            error,
+            equip_error,
+            item,
+        } => {
+            assert_eq!(
+                (mail_id, action, error),
+                (4, mail_action::ITEM_TAKEN, mail_error::INTERNAL_ERROR)
+            );
+            assert_eq!(equip_error, None);
+            assert_eq!(item, Some((0, 0)));
+        }
+        other => panic!("send mail result (failed take), got {}", other.name()),
+    }
 }
 
 #[test]

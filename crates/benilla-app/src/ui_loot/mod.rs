@@ -101,6 +101,9 @@ pub(crate) struct LootState {
     pending_master_candidates: Vec<u64>,
     /// The wire `loot_type` (`0x4c2740`); a disenchant window with rows left survives movement.
     loot_type: u8,
+    /// Bumped on every [`Self::open`] so a replace is a new window even when the rows match
+    /// (two copper veins in a row). 0 while shut.
+    generation: u64,
 }
 
 /// The client's candidate array: 40 slots at `0xc4dc38`, bound-checked by the getter `0x61c660`.
@@ -133,6 +136,7 @@ impl LootState {
         self.loot_type = loot_type;
         self.fishing = loot_type == benilla_protocol::messages::loot_type::FISHING;
         self.master_candidates = std::mem::take(&mut self.pending_master_candidates);
+        self.generation = self.generation.wrapping_add(1).max(1);
     }
 
     /// Stages a list for the next open; an open window takes it at once, as a refresh.
@@ -195,6 +199,7 @@ impl LootState {
         self.pending_bind_confirm = None;
         self.master_candidates.clear();
         self.pending_master_candidates.clear();
+        self.generation = 0;
     }
 
     /// Session end: drops the window and the queued pushes.
@@ -665,6 +670,7 @@ fn feed_loot(
     commands: Res<NetCommands>,
     mut chat: ResMut<crate::ui_chat::ChatLog>,
     mut last: Local<crate::ui_script::VmMemo<Option<LootSnapshot>>>,
+    mut last_gen: Local<crate::ui_script::VmMemo<u64>>,
     cfg: Res<LootConfig>,
     keys: Res<ButtonInput<KeyCode>>,
     mut pickup: MessageWriter<crate::sound::LootPickupSound>,
@@ -679,6 +685,7 @@ fn feed_loot(
         return;
     };
     let last = last.get(&script);
+    let last_gen = last_gen.get(&script);
     let rolls = RollCatalogs {
         props: props.as_deref(),
         enchants: enchants.as_deref(),
@@ -701,7 +708,9 @@ fn feed_loot(
         snap.source_unit = loot.source().is_some_and(|g| objects.is_unit(g));
         snap
     });
-    if fresh == *last {
+    let gen = loot.generation;
+    // Same rows from a new `open()` (two copper veins) must still fire `LOOT_OPENED`.
+    if fresh == *last && gen == *last_gen {
         return;
     }
     script.set_loot(fresh.clone());
@@ -710,51 +719,37 @@ fn feed_loot(
             // No window until every template has landed: the copier fires nothing while a query
             // is pending (`0x4c1e9f`), and the cache callback `0x4c2ac0` fires `LOOT_OPENED` (or
             // the auto-loot sweep) at the last answer. Not advancing `last` retries next frame.
-            if templates_outstanding(&items, snap) {
+            if !fire_loot_opened(
+                &mut script,
+                &mut loot,
+                snap,
+                &items,
+                &commands,
+                &keys,
+                &cfg,
+                &mut pickup,
+            ) {
                 return;
             }
-            script.fire_event("LOOT_OPENED", vec![]);
-            // Auto-loot (`LootConfig`), inverted by a held Shift: every row gets a hand pick's
-            // sends, and emptying the window auto-releases it.
-            let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-            if cfg.auto_loot != shift {
-                let mut bind_confirm_fired = false;
-                for index in 1..=snap.rows.len() as u32 {
-                    match loot.action_at(index) {
-                        Some(LootAction::Money) => {
-                            let _ = commands.0.send(ClientCommand::LootMoney);
-                        }
-                        // Only `ALLOW_LOOT` rows: the reference's sweep skips any other slot type
-                        // (`0x4c2180`/`0x4c2196`).
-                        Some(LootAction::Item {
-                            wire_slot,
-                            display_id,
-                            item_id,
-                            slot_type,
-                        }) if slot_type == slot_type::ALLOW_LOOT => {
-                            // A hand click's bind gate plus a one-shot latch (`0x4c21c2`,
-                            // `0x4c21e2`): later bind-on-pickup rows stay, untaken and unasked.
-                            if bind_confirm_required(&items, &commands, item_id) {
-                                if bind_confirm_fired {
-                                    continue;
-                                }
-                                loot.pending_bind_confirm = Some(index);
-                                script.fire_event(
-                                    "LOOT_BIND_CONFIRM",
-                                    vec![ScriptValue::Int(i64::from(index))],
-                                );
-                                bind_confirm_fired = true;
-                                continue;
-                            }
-                            let _ = commands
-                                .0
-                                .send(ClientCommand::AutostoreLootItem { slot: wire_slot });
-                            pickup.write(crate::sound::LootPickupSound { display_id });
-                        }
-                        Some(LootAction::Item { .. }) | None => {}
-                    }
-                }
+        }
+        // A new `open()` while the previous snapshot is still live: pfUI only rebuilds on
+        // `LOOT_OPENED`, and two copper veins often have identical rows so equality would skip
+        // the event. Close then open, as a 1.12 copier does for each completed response.
+        (Some(_), Some(after)) if *last_gen != gen && gen != 0 => {
+            if templates_outstanding(&items, after) {
+                return;
             }
+            script.fire_event("LOOT_CLOSED", vec![]);
+            let _ = fire_loot_opened(
+                &mut script,
+                &mut loot,
+                after,
+                &items,
+                &commands,
+                &keys,
+                &cfg,
+                &mut pickup,
+            );
         }
         // One `LOOT_SLOT_CLEARED` per row that went, with its 1-based row: the stock handler hides
         // that button and pages down when the page empties (`LootFrame.lua:22-50`).
@@ -774,6 +769,67 @@ fn feed_loot(
         (None, None) => {}
     }
     *last = fresh;
+    *last_gen = gen;
+}
+
+/// `LOOT_OPENED` plus the auto-loot sweep. False while a template is still in flight, so the
+/// caller leaves `last` alone and retries.
+fn fire_loot_opened(
+    script: &mut UiScript,
+    loot: &mut LootState,
+    snap: &LootSnapshot,
+    items: &Items,
+    commands: &NetCommands,
+    keys: &ButtonInput<KeyCode>,
+    cfg: &LootConfig,
+    pickup: &mut MessageWriter<crate::sound::LootPickupSound>,
+) -> bool {
+    if templates_outstanding(items, snap) {
+        return false;
+    }
+    script.fire_event("LOOT_OPENED", vec![]);
+    // Auto-loot (`LootConfig`), inverted by a held Shift: every row gets a hand pick's
+    // sends, and emptying the window auto-releases it.
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if cfg.auto_loot != shift {
+        let mut bind_confirm_fired = false;
+        for index in 1..=snap.rows.len() as u32 {
+            match loot.action_at(index) {
+                Some(LootAction::Money) => {
+                    let _ = commands.0.send(ClientCommand::LootMoney);
+                }
+                // Only `ALLOW_LOOT` rows: the reference's sweep skips any other slot type
+                // (`0x4c2180`/`0x4c2196`).
+                Some(LootAction::Item {
+                    wire_slot,
+                    display_id,
+                    item_id,
+                    slot_type,
+                }) if slot_type == slot_type::ALLOW_LOOT => {
+                    // A hand click's bind gate plus a one-shot latch (`0x4c21c2`,
+                    // `0x4c21e2`): later bind-on-pickup rows stay, untaken and unasked.
+                    if bind_confirm_required(items, commands, item_id) {
+                        if bind_confirm_fired {
+                            continue;
+                        }
+                        loot.pending_bind_confirm = Some(index);
+                        script.fire_event(
+                            "LOOT_BIND_CONFIRM",
+                            vec![ScriptValue::Int(i64::from(index))],
+                        );
+                        bind_confirm_fired = true;
+                        continue;
+                    }
+                    let _ = commands
+                        .0
+                        .send(ClientCommand::AutostoreLootItem { slot: wire_slot });
+                    pickup.write(crate::sound::LootPickupSound { display_id });
+                }
+                Some(LootAction::Item { .. }) | None => {}
+            }
+        }
+    }
+    true
 }
 
 /// Whether a take must raise `LOOT_BIND_CONFIRM` first (`0x4c28f2`/`0x4c28fb`): bind on pickup
@@ -1287,6 +1343,75 @@ mod tests {
             app.update();
             assert_eq!(opens(&mut app), 1, "and only once");
         }
+    }
+
+    /// Two copper veins in a row: same coin/rows, different `open()`. pfUI rebuilds only on
+    /// `LOOT_OPENED`; without a generation the snapshots compared equal and the second window
+    /// stayed blank until Escape.
+    #[test]
+    fn a_replaced_window_fires_closed_then_opened_even_when_the_rows_match() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.add_message::<crate::sound::LootPickupSound>()
+            .init_resource::<LootState>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<GroupState>()
+            .init_resource::<NameCache>()
+            .init_resource::<Items>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<LootConfig>()
+            .insert_resource(NetCommands(tx))
+            .add_systems(bevy::prelude::Update, feed_loot);
+
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                "OPENS, CLOSES = 0, 0\n\
+                 local f = CreateFrame(\"Frame\")\n\
+                 f:RegisterEvent(\"LOOT_OPENED\")\n\
+                 f:RegisterEvent(\"LOOT_CLOSED\")\n\
+                 f:SetScript(\"OnEvent\", function()\n\
+                   if event == \"LOOT_OPENED\" then OPENS = OPENS + 1\n\
+                   elseif event == \"LOOT_CLOSED\" then CLOSES = CLOSES + 1 end\n\
+                 end)",
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+
+        let count = |app: &mut App, var: &str| {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<i64>(&format!("return {var}"))
+                .unwrap()
+        };
+
+        app.world_mut().resource_mut::<LootState>().open(
+            0x42,
+            loot_type::PICKPOCKETING,
+            5,
+            Vec::new(),
+        );
+        app.update();
+        assert_eq!(count(&mut app, "OPENS"), 1);
+        assert_eq!(count(&mut app, "CLOSES"), 0);
+
+        app.world_mut().resource_mut::<LootState>().open(
+            0x43,
+            loot_type::PICKPOCKETING,
+            5,
+            Vec::new(),
+        );
+        app.update();
+        assert_eq!(
+            count(&mut app, "CLOSES"),
+            1,
+            "the first window is closed before the second opens"
+        );
+        assert_eq!(
+            count(&mut app, "OPENS"),
+            2,
+            "identical copper still raises LOOT_OPENED"
+        );
     }
 
     /// The rows `LOOT_BIND_CONFIRM` has named so far, in order.

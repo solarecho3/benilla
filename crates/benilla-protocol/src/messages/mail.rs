@@ -228,8 +228,9 @@ pub(super) fn read_mail_list_result(r: &mut &[u8]) -> io::Result<Vec<MailListEnt
     Ok(mails)
 }
 
-/// `SMSG_SEND_MAIL_RESULT` (vmangos `Server/Packets/Mail.cpp`): `u32 mailId, action, error`, then
-/// `u32 equipError` on `EQUIP_ERROR`, or `u32 itemEntry, itemCount` on an OK `ITEM_TAKEN`.
+/// `SMSG_SEND_MAIL_RESULT` (CMaNGOS `Player::SendMailResult`): `u32 mailId, action, error`, then
+/// `u32 equipError` on `EQUIP_ERROR`, or `u32 itemEntry, itemCount` on every `ITEM_TAKEN` that is
+/// not an equip error (OK, INTERNAL_ERROR, NOT_ENOUGH_MONEY).
 #[allow(clippy::type_complexity)]
 pub(super) fn read_send_mail_result(
     r: &mut &[u8],
@@ -241,7 +242,7 @@ pub(super) fn read_send_mail_result(
     let mut item = None;
     if error == mail_error::EQUIP_ERROR && !r.is_empty() {
         equip_error = Some(read_u32_le(r)?);
-    } else if action == mail_action::ITEM_TAKEN && error == mail_error::OK && !r.is_empty() {
+    } else if action == mail_action::ITEM_TAKEN && !r.is_empty() {
         item = Some((read_u32_le(r)?, read_u32_le(r)?));
     }
     Ok((mail_id, action, error, equip_error, item))

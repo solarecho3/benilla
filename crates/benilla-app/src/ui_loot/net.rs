@@ -60,9 +60,21 @@ fn on_error(
     }
 }
 
-fn on_removed(In(ev): In<SessionEvent>, mut loot: ResMut<LootState>) {
+fn on_removed(
+    In(ev): In<SessionEvent>,
+    mut loot: ResMut<LootState>,
+    mut latch: ResMut<LootLatch>,
+    net: Res<NetCommands>,
+    mut dead: super::DeadUnitDeselect,
+) {
     if let SessionEvent::LootRemoved { slot } = ev {
         loot_removed(slot, &mut loot);
+        // Close with a send here, in the net drain, so a following `SMSG_LOOT_RELEASE_RESPONSE`
+        // in the same batch cannot clear `auto_release` before `drain_loot` runs. CMaNGOS
+        // mineral veins refill only in `Loot::Release()` on `CMSG_LOOT_RELEASE`.
+        if loot.take_auto_release() {
+            dead.after_close(close_interaction(&mut loot, &mut latch, Some(&net)));
+        }
     }
 }
 
@@ -85,13 +97,20 @@ fn on_release_response(
     mut pending: ResMut<PendingItemOps>,
     mut lock_cleared: ResMut<LockTransitions>,
     mut dead: super::DeadUnitDeselect,
+    net: Option<Res<NetCommands>>,
 ) {
     if let SessionEvent::LootReleaseResponse { guid } = ev {
         let unlock = ItemUnlock {
             pending: &mut pending,
             lock_cleared: &mut lock_cleared,
         };
-        dead.after_close(loot_release_response(guid, &mut loot, &mut latch, unlock));
+        dead.after_close(loot_release_response(
+            guid,
+            &mut loot,
+            &mut latch,
+            unlock,
+            net.as_deref(),
+        ));
     }
 }
 
@@ -294,18 +313,25 @@ fn loot_clear_money(loot: &mut LootState) {
 /// as the reference's (`0x5ec0d4`), so an old window's release keeps a newer request's latch.
 /// It unlocks an opened item (`0x5ec090` → `0x48f200(cl=0, dl=0)` → `UnlockItem 0x495420`): the
 /// only clear a lockbox closed with loot left gets, as vmangos destroys only a fully looted item
-/// (`LootHandler.cpp:558`). The open window takes the shared close without a send (`0x5ec0f3`);
-/// the closed source is returned.
+/// (`LootHandler.cpp:558`). A matching open window takes the shared close (`0x5ec0f3`); a
+/// different source is left alone. GameObject windows still send `CMSG_LOOT_RELEASE`: CMaNGOS
+/// mineral veins refill in `Loot::Release()`, and `SendReleaseForAll` after the last ore does
+/// not. Item and unit windows keep the reference's no-send close.
 fn loot_release_response(
     guid: u64,
     loot: &mut LootState,
     latch: &mut LootLatch,
     unlock: ItemUnlock,
+    net: Option<&NetCommands>,
 ) -> Option<u64> {
     debug!("net: loot released {guid:#x}");
     latch.clear_for(guid);
     unlock.unlock(guid);
-    super::close_interaction(loot, latch, None)
+    if loot.source() != Some(guid) {
+        return None;
+    }
+    let release = net.filter(|_| benilla_protocol::guid::is_gameobject(guid));
+    super::close_interaction(loot, latch, release)
 }
 
 /// `SMSG_LOOT_MASTER_LIST`, staged: it lands just ahead of the response it belongs to.
@@ -536,7 +562,7 @@ mod tests {
             "an accepted response bounces nothing"
         );
 
-        loot_release_response(CHEST, &mut loot, &mut latch, no_item!());
+        loot_release_response(CHEST, &mut loot, &mut latch, no_item!(), None);
         assert_eq!(latch.0, None, "the release ends the session");
     }
 
@@ -621,6 +647,99 @@ mod tests {
             matches!(rx.try_recv(), Ok(ClientCommand::LootRelease { guid }) if guid == CHEST),
             "…and it is B that gets released"
         );
+    }
+
+    /// A matching window is closed; a newer one on a different guid is not.
+    #[test]
+    fn a_stale_release_response_leaves_the_open_window() {
+        let mut loot = LootState::default();
+        let mut latch = LootLatch(Some(CHEST_B));
+        loot.open(CHEST_B, 2, 0, Vec::new());
+
+        let closed = loot_release_response(CHEST, &mut loot, &mut latch, no_item!(), None);
+        assert_eq!(closed, None, "A's release is not B's window");
+        assert_eq!(loot.source(), Some(CHEST_B));
+        assert_eq!(latch.0, Some(CHEST_B), "B's latch is guid-matched and kept");
+    }
+
+    /// CMaNGOS refills a mineral vein in `Loot::Release()` on `CMSG_LOOT_RELEASE`. The last ore
+    /// also sends `SMSG_LOOT_RELEASE_RESPONSE`; echoing the release on a GameObject is what
+    /// arms the next hit. An item lockbox still takes the reference's no-send close.
+    #[test]
+    fn a_gameobject_release_response_echoes_cmsg_loot_release() {
+        let (chest_net, chest_rx) = net();
+        let mut loot = LootState::default();
+        let mut latch = LootLatch(Some(CHEST));
+        loot.open(CHEST, 2, 0, Vec::new());
+
+        loot_release_response(CHEST, &mut loot, &mut latch, no_item!(), Some(&chest_net));
+        assert_eq!(loot.source(), None);
+        assert!(
+            matches!(chest_rx.try_recv(), Ok(ClientCommand::LootRelease { guid }) if guid == CHEST),
+            "the vein's Release() is what refills it"
+        );
+
+        let (item_net, item_rx) = net();
+        let mut loot = LootState::default();
+        let mut latch = LootLatch(Some(LOCKBOX));
+        loot.open(LOCKBOX, 1, 0, Vec::new());
+        loot_release_response(LOCKBOX, &mut loot, &mut latch, no_item!(), Some(&item_net));
+        assert_eq!(loot.source(), None);
+        assert!(
+            item_rx.try_recv().is_err(),
+            "a lockbox close does not echo the server's release"
+        );
+    }
+
+    /// Last slot gone: send `CMSG_LOOT_RELEASE` in the net handler so a following
+    /// `SMSG_LOOT_RELEASE_RESPONSE` cannot swallow `auto_release` before `drain_loot`.
+    #[test]
+    fn emptying_a_chest_sends_release_in_the_removed_handler() {
+        let (net, rx) = net();
+        let mut world = World::new();
+        world.init_resource::<LootState>();
+        world.insert_resource(LootLatch(Some(CHEST)));
+        world.insert_resource(net);
+        world.init_resource::<crate::net::GuidIndex>();
+        world.init_resource::<bevy::ecs::message::Messages<crate::target::DeselectGuid>>();
+        world.init_resource::<PendingItemOps>();
+        world.init_resource::<LockTransitions>();
+        world
+            .resource_mut::<LootState>()
+            .open(CHEST, 2, 0, vec![ore_row()]);
+        world.resource_mut::<LootLatch>().0 = Some(CHEST);
+
+        world
+            .run_system_once_with(on_removed, SessionEvent::LootRemoved { slot: 0 })
+            .expect("the handler runs as a one-shot system");
+        assert_eq!(world.resource::<LootState>().source(), None);
+        assert_eq!(world.resource::<LootLatch>().0, None);
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::LootRelease { guid }) if guid == CHEST),
+            "the last ore's removal is the vein's CMSG_LOOT_RELEASE"
+        );
+
+        world
+            .run_system_once_with(
+                on_release_response,
+                SessionEvent::LootReleaseResponse { guid: CHEST },
+            )
+            .expect("the handler runs as a one-shot system");
+        assert!(
+            rx.try_recv().is_err(),
+            "the server's release does not send a second time"
+        );
+    }
+
+    fn ore_row() -> LootItem {
+        LootItem {
+            slot: 0,
+            item_id: 2770,
+            count: 1,
+            display_info_id: 11980,
+            random_property_id: 0,
+            slot_type: 0,
+        }
     }
 
     /// An item guid (`HIGHGUID_ITEM` 0x4000 in the high word): a lockbox.

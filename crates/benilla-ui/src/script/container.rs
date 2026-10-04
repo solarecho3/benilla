@@ -524,18 +524,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
             let link = {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                model.containers.get(&bag).and_then(|c| c.slots.get(&slot)).and_then(
-                    |s| {
+                model
+                    .containers
+                    .get(&bag)
+                    .and_then(|c| c.slots.get(&slot))
+                    .and_then(|s| {
                         s.link.clone().or_else(|| {
                             // Template still in flight: the slot is occupied (`itemCount`
                             // truthy, including Lua's 0) so addons that strfind the link
                             // must not see nil. The id is enough for `(%d+):`.
-                            (s.item_id != 0).then(|| {
-                                format!("|cffffffff|Hitem:{}:0:0:0|h[]|h|r", s.item_id)
-                            })
+                            (s.item_id != 0)
+                                .then(|| format!("|cffffffff|Hitem:{}:0:0:0|h[]|h|r", s.item_id))
                         })
-                    },
-                )
+                    })
             };
             match link {
                 Some(l) => Ok(Value::String(lua.create_string(&l)?)),

@@ -626,3 +626,122 @@ fn a_hovered_or_selected_craft_row_paints_its_label_white() {
         "the old selection is UNLOCKED, not left lit"
     );
 }
+
+/// Beast Training paints `"none"` green and `"used"` gray, and the action button is Train
+/// (`GetCraftButtonToken` → `TRAIN`). `craftType == "used"` disables the button.
+#[test]
+fn beast_training_rows_use_none_and_used_colors_and_the_train_token() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    load_ui(&s);
+    s.set_screen_size(1024.0, 768.0);
+
+    let recipe = |spell_id: u32, name: &str, difficulty: TradeSkillDifficulty| CraftRecipe {
+        spell_id,
+        name: name.into(),
+        sub_name: "Rank 1".into(),
+        difficulty,
+        num_available: 0,
+        icon: Some("Interface\\Icons\\Ability_Physical_Taunt".into()),
+        description: Some("Taunt the target.".into()),
+        needs_item_target: false,
+        reagents: vec![],
+        tools: vec![],
+        tooltip: CraftTooltip::Spell(spell_id),
+        spell_level: 1,
+    };
+    s.set_craft(Some(CraftState {
+        name: "Beast Training".into(),
+        rank: 0,
+        max_rank: 0,
+        craft_type: 1,
+        recipes: vec![
+            recipe(1853, "Growl", TradeSkillDifficulty::Used),
+            recipe(17254, "Bite", TradeSkillDifficulty::None),
+        ],
+    }));
+    s.fire_event("CRAFT_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    assert_eq!(
+        s.eval::<String>("return CraftCreateButton:GetText()")
+            .unwrap(),
+        "Train"
+    );
+    // Learnable rows sort first (`none` is craft tier 0).
+    assert_eq!(
+        s.eval::<String>("local n = GetCraftInfo(1) return n")
+            .unwrap(),
+        "Bite"
+    );
+    assert_eq!(
+        s.eval::<String>("local n = GetCraftInfo(2) return n")
+            .unwrap(),
+        "Growl"
+    );
+
+    const GREEN: [f32; 4] = [0.25, 0.75, 0.25, 1.0]; // CraftTypeColor["none"]
+    const GRAY: [f32; 4] = [0.5, 0.5, 0.5, 1.0]; // CraftTypeColor["used"]
+    const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+    let row_color = |s: &mut UiScript, n: i64| -> [f32; 4] {
+        let text = s
+            .eval::<String>(&format!("return Craft{n}:GetText()"))
+            .unwrap();
+        s.resolve();
+        s.extract()
+            .into_iter()
+            .find_map(|q| match q.content {
+                benilla_ui::script::QuadContent::Text {
+                    text: Some(t),
+                    color,
+                    ..
+                } if t == text => color,
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no text quad for craft row {n} (\"{text}\")"))
+    };
+
+    s.run("CraftFrame_SetSelection(1); CraftFrame_Update()")
+        .unwrap();
+    s.resolve();
+    s.mouse_move(1000.0, 20.0);
+    assert_eq!(
+        row_color(&mut s, 1),
+        WHITE,
+        "selected learnable row is white"
+    );
+    assert_eq!(
+        row_color(&mut s, 2),
+        GRAY,
+        "unselected known row is used-gray"
+    );
+    assert_eq!(
+        s.eval::<i64>("return CraftCreateButton:IsEnabled()")
+            .unwrap(),
+        1,
+        "Train is enabled on a none row"
+    );
+
+    s.run("CraftFrame_SetSelection(2); CraftFrame_Update()")
+        .unwrap();
+    s.resolve();
+    s.mouse_move(1000.0, 20.0);
+    assert_eq!(row_color(&mut s, 2), WHITE, "selected used row is white");
+    assert_eq!(
+        row_color(&mut s, 1),
+        GREEN,
+        "unselected learnable row is none-green"
+    );
+    let kind = s
+        .eval::<String>("local _,_,t = GetCraftInfo(GetCraftSelectionIndex()) return tostring(t)")
+        .unwrap();
+    let enabled = s
+        .eval::<i64>("return CraftCreateButton:IsEnabled()")
+        .unwrap();
+    assert_eq!(
+        (kind.as_str(), enabled),
+        ("used", 0),
+        "Train is disabled on a used row"
+    );
+}

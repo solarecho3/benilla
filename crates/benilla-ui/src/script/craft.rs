@@ -53,10 +53,9 @@ pub struct CraftRecipe {
     /// The rank subtext (`craftSubSpellName`), usually empty for an enchant; the stock window
     /// paints it in parentheses when set (`Blizzard_CraftUI.lua:217-221`).
     pub sub_name: String,
-    /// `GetCraftInfo`'s `craftType`: one of the four keys `CraftTypeColor` colours as
-    /// `TradeSkillTypeColor` does (`Blizzard_CraftUI.lua:6-13`). The reference's table
-    /// (`0x807e00`) adds `"none"` and `"used"` (a still-optimal Beast Training recipe teaching a
-    /// learnable spell); Enchanting never produces either, and neither is built.
+    /// `GetCraftInfo`'s `craftType`: a `CraftTypeColor` key (`Blizzard_CraftUI.lua:6-13`).
+    /// Enchanting uses the four skill-up bands. Beast Training uses `"none"` (green, still
+    /// learnable) and `"used"` (gray, already known); Train is disabled on `"used"`.
     pub difficulty: super::TradeSkillDifficulty,
     /// `numAvailable`: the least `floor(have / need)` over the reagents.
     pub num_available: u32,
@@ -103,8 +102,8 @@ const CRAFT_TYPE_BEAST_TRAINING: u32 = 1;
 /// reproduce; ascending id is ascending rank in every 1.12 pet-ability family.
 fn recipe_order(a: &CraftRecipe, b: &CraftRecipe, craft_type: u32) -> std::cmp::Ordering {
     a.difficulty
-        .tier()
-        .cmp(&b.difficulty.tier())
+        .craft_tier()
+        .cmp(&b.difficulty.craft_tier())
         .then_with(|| collate(&a.name, &b.name))
         .then_with(|| {
             if craft_type == CRAFT_TYPE_BEAST_TRAINING {
@@ -364,11 +363,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // GetCraftButtonToken() → "CREATE", the global naming the button's label
-    // (`Blizzard_CraftUI.lua:106`); Beast Training's "TRAIN" is not built.
+    // GetCraftButtonToken() → the GlobalStrings key for the action button
+    // (`Blizzard_CraftUI.lua:106`). Beast Training (`craft_type` 1) is "TRAIN"; Enchanting is
+    // "CREATE".
     g.set(
         "GetCraftButtonToken",
-        lua.create_function(|lua, ()| Ok(Value::String(lua.create_string("CREATE")?)))?,
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let token = match model.craft.as_ref().map(|c| c.craft_type) {
+                Some(CRAFT_TYPE_BEAST_TRAINING) => "TRAIN",
+                _ => "CREATE",
+            };
+            Ok(Value::String(lua.create_string(token)?))
+        })?,
     )?;
 
     // SelectCraft(index) / GetCraftSelectionIndex(): the selection, 1-based with 0 for none; an
@@ -773,6 +780,59 @@ mod tests {
             s.take_craft_dos(),
             vec![24495, 24508, 24509, 24510, 24440, 24441, 24463, 24464],
             "no spellLevel key at type 3 — the order is name then the deterministic id tie-break"
+        );
+    }
+
+    #[test]
+    fn beast_training_token_is_train_and_learnable_rows_sort_above_known() {
+        let row = |spell_id: u32, name: &str, difficulty: super::super::TradeSkillDifficulty| {
+            CraftRecipe {
+                spell_id,
+                tooltip: CraftTooltip::Spell(spell_id),
+                name: name.into(),
+                sub_name: String::new(),
+                difficulty,
+                num_available: 0,
+                icon: None,
+                description: None,
+                needs_item_target: false,
+                reagents: vec![],
+                tools: vec![],
+                spell_level: 1,
+            }
+        };
+        let mut s = UiScript::new().unwrap();
+        s.set_craft(Some(CraftState {
+            name: "Beast Training".into(),
+            rank: 0,
+            max_rank: 0,
+            craft_type: CRAFT_TYPE_BEAST_TRAINING,
+            recipes: vec![
+                row(1853, "Growl", super::super::TradeSkillDifficulty::Used),
+                row(17254, "Bite", super::super::TradeSkillDifficulty::None),
+            ],
+        }));
+        assert_eq!(
+            s.eval::<String>("return GetCraftButtonToken()").unwrap(),
+            "TRAIN"
+        );
+        let (first, first_kind) = s
+            .eval::<(String, String)>("local n,_,t = GetCraftInfo(1) return n,t")
+            .unwrap();
+        let (second, second_kind) = s
+            .eval::<(String, String)>("local n,_,t = GetCraftInfo(2) return n,t")
+            .unwrap();
+        assert_eq!(
+            (first.as_str(), first_kind.as_str()),
+            ("Bite", "none"),
+            "learnable (none) sorts above already-known (used)"
+        );
+        assert_eq!((second.as_str(), second_kind.as_str()), ("Growl", "used"));
+        s.set_craft(Some(state()));
+        assert_eq!(
+            s.eval::<String>("return GetCraftButtonToken()").unwrap(),
+            "CREATE",
+            "Enchanting keeps CREATE"
         );
     }
 

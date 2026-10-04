@@ -362,6 +362,31 @@ fn closing_a_plain_letter_does_not_delete_it() {
     );
 }
 
+/// `OpenMailFrame_OnHide` stores `InboxFrame.openMailID = 0`. Lua 5.1 treats 0 as truthy, so
+/// `MAIL_INBOX_UPDATE` still runs `OpenMail_Update`, which compares `CODAmount > 0`
+/// (`MailFrame.lua:399`). A miss that is a single nil raises; numeric zeros do not.
+#[test]
+fn open_mail_update_survives_a_zero_open_mail_id() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = UiScript::new().unwrap();
+    load_ui(&s);
+    s.set_mail(Some(small_inbox()));
+    s.fire_event("MAIL_SHOW", vec![]);
+    s.fire_event("MAIL_INBOX_UPDATE", vec![]);
+    s.run("MailItem1Button:Click()").unwrap();
+    s.run("OpenMailCancelButton:Click()").unwrap();
+    assert_eq!(
+        s.eval::<i64>("return InboxFrame.openMailID").unwrap(),
+        0,
+        "OnHide stores 0, not nil"
+    );
+    s.fire_event("MAIL_INBOX_UPDATE", vec![]);
+    assert!(
+        s.take_errors().is_empty(),
+        "OpenMail_Update must not raise on openMailID 0"
+    );
+}
+
 /// A mail with no money, no item and `textCreated` is deleted on close. vmangos marks an
 /// empty-body player mail COPIED, the wire's `textCreated` bit (`MailHandler.cpp:421`), so a
 /// subject-only letter with nothing attached is deleted when closed.
