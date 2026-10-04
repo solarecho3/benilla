@@ -288,8 +288,15 @@ fn set_point(lua: &Lua, this: &Table, args: &MultiValue) -> mlua::Result<()> {
     let rel_to_id = resolve_rel_target(&model, &p.target, &who, "SetPoint", me, parent)?;
     let (point, rel_point, x, y) = (p.point, p.rel_point, p.x, p.y);
 
-    let input = model.layout_inputs.entry(h).or_default();
     let new = Anchor::new(point, rel_to_id, rel_point, x, y);
+    commit_frame_anchor(&mut model, h, new);
+    Ok(())
+}
+
+/// `SetPoint` (`0x767c70`): slot by `point`, keep every other point. The GameTooltip cursor
+/// update (`0x530b20`) uses this, so an addon's follow-frame `SetPoint` survives `ANCHOR_CURSOR`.
+pub(crate) fn commit_frame_anchor(model: &mut Model, h: FrameHandle, new: Anchor) {
+    let input = model.layout_inputs.entry(h).or_default();
     // A no-op only when the identical anchor is already last and no earlier one has this point,
     // mirroring the retain and push below; bits compared, as the fingerprint tells -0.0 from 0.0.
     let same_at_tail = input
@@ -298,28 +305,28 @@ fn set_point(lua: &Lua, this: &Table, args: &MultiValue) -> mlua::Result<()> {
         .is_some_and(|a| anchor_bits_eq(a, &new))
         && !input.anchors[..input.anchors.len() - 1]
             .iter()
-            .any(|a| a.point == point);
-    if !same_at_tail {
-        // Target lists are collected only for a retarget: the value-only change is the per-frame
-        // idiom (a dragged window) and must stay allocation-free.
-        let structural = anchor_retarget_is_structural(&input.anchors, &new);
-        let old_targets: Option<Vec<u32>> =
-            structural.then(|| input.anchors.iter().map(|a| a.relative_to).collect());
-        input.anchors.retain(|a| a.point != point);
-        input.anchors.push(new);
-        match old_targets {
-            None => model.touch_layout_frame(h),
-            Some(old) => {
-                let new_targets: Vec<u32> = model.layout_inputs[&h]
-                    .anchors
-                    .iter()
-                    .map(|a| a.relative_to)
-                    .collect();
-                model.touch_layout_retarget_frame(h, &old, &new_targets);
-            }
+            .any(|a| a.point == new.point);
+    if same_at_tail {
+        return;
+    }
+    // Target lists are collected only for a retarget: the value-only change is the per-frame
+    // idiom (a dragged window) and must stay allocation-free.
+    let structural = anchor_retarget_is_structural(&input.anchors, &new);
+    let old_targets: Option<Vec<u32>> =
+        structural.then(|| input.anchors.iter().map(|a| a.relative_to).collect());
+    input.anchors.retain(|a| a.point != new.point);
+    input.anchors.push(new);
+    match old_targets {
+        None => model.touch_layout_frame(h),
+        Some(old) => {
+            let new_targets: Vec<u32> = model.layout_inputs[&h]
+                .anchors
+                .iter()
+                .map(|a| a.relative_to)
+                .collect();
+            model.touch_layout_retarget_frame(h, &old, &new_targets);
         }
     }
-    Ok(())
 }
 
 /// Whether this `SetPoint` changes the node's anchor targets, mirroring the setters' retain and

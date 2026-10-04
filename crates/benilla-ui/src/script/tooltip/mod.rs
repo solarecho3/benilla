@@ -560,31 +560,26 @@ fn cell(model: &Model, rh: crate::widget::RegionHandle) -> Cell {
 
 /// `ANCHOR_CURSOR` (mode 6), re-anchored every frame by the update override `0x530b20`: one
 /// `SetPoint` (`0x767c70`) pins the plate's BOTTOM to the screen root's BOTTOMLEFT (`0xcf0bd8`)
-/// at the cursor position divided by the tooltip's own effective scale, so it sits centred above
-/// the cursor. There is no `ClearAllPoints`, and `SetPoint`'s no-op gate keeps a still cursor
-/// free. The `SetOwner` offsets play no part (only `0x52fe90` reads them). Only a shown tooltip is
-/// in the update pump (`0x76ad9d`), and the placement lands the same frame, before the layout
-/// drain (`0x768ed0`).
+/// at the cursor position divided by the tooltip's own effective scale, so a native plate sits
+/// centred above the cursor. There is no `ClearAllPoints`; other points (pfUI cursoralign left /
+/// right / top onto a follow frame) stay, and `assemble` takes the extra edge from them. The
+/// `SetOwner` offsets play no part (only `0x52fe90` reads them). Only a shown tooltip is in the
+/// update pump (`0x76ad9d`), and the placement lands the same frame, before the layout drain
+/// (`0x768ed0`).
 fn cursor_anchor(model: &mut Model, h: FrameHandle) {
     let scale = crate::script::object::eff_scale(model, h);
     let (cx, cy) = model.cursor_pos;
-    let new = Anchor::new(
-        Point::Bottom,
-        super::SCREEN,
-        Point::BottomLeft,
-        cx / scale,
-        cy / scale,
+    crate::script::object::commit_frame_anchor(
+        model,
+        h,
+        Anchor::new(
+            Point::Bottom,
+            super::SCREEN,
+            Point::BottomLeft,
+            cx / scale,
+            cy / scale,
+        ),
     );
-    let input = model.layout_inputs.entry(h).or_default();
-    // `0x767c70`'s change detect: the one slot is replaced only on a real change.
-    let same =
-        input.anchors.len() == 1 && crate::script::object::anchor_bits_eq(&input.anchors[0], &new);
-    if same {
-        return;
-    }
-    let old_targets: Vec<u32> = input.anchors.iter().map(|a| a.relative_to).collect();
-    input.anchors = vec![new];
-    model.touch_layout_retarget_frame(h, &old_targets, &[super::SCREEN]);
 }
 
 pub(super) fn layout_tooltips(model: &mut Model) {

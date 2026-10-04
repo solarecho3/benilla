@@ -804,6 +804,55 @@ fn anchor_cursor_follows_the_cursor_every_frame() {
     );
 }
 
+/// pfUI cursoralign left: `SetOwner(..., "ANCHOR_CURSOR")` then `SetPoint` onto a follow frame.
+/// `0x530b20` is one `SetPoint` of BOTTOM, not a wipe, so the plate hangs off that frame.
+#[test]
+fn anchor_cursor_keeps_a_later_setpoint() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        Tip = CreateFrame("GameTooltip", "Tip")
+        Host = CreateFrame("Frame", "Host")
+        Cur = CreateFrame("Frame", "Cur")
+        Cur:SetWidth(40) Cur:SetHeight(40)
+        Cur:SetPoint("CENTER", nil, "BOTTOMLEFT", 300, 200)
+        Tip:SetOwner(Host, "ANCHOR_CURSOR")
+        Tip:SetPoint("BOTTOMRIGHT", Cur, "LEFT", 0, 0)
+        Tip:SetWidth(120) Tip:SetHeight(40)
+        Tip:Show()
+        "#,
+    )
+    .unwrap();
+    s.mouse_move(300.0, 200.0);
+    s.resolve();
+    let (left, right, bottom): (f32, f32, f32) = s
+        .eval("return Tip:GetLeft(), Tip:GetRight(), Tip:GetBottom()")
+        .unwrap();
+    assert_eq!(bottom, 200.0, "bottom still sits on the cursor");
+    assert!(
+        (right - 280.0).abs() < 0.001,
+        "right edge on the follow frame's left, not centred on the cursor: {left}..{right}"
+    );
+    assert!(
+        (left - 160.0).abs() < 0.001,
+        "width 120 hanging left of that edge: {left}..{right}"
+    );
+
+    s.run(r#"Cur:SetPoint("CENTER", nil, "BOTTOMLEFT", 200, 400)"#)
+        .unwrap();
+    s.mouse_move(200.0, 400.0);
+    s.resolve();
+    let (left, right, bottom): (f32, f32, f32) = s
+        .eval("return Tip:GetLeft(), Tip:GetRight(), Tip:GetBottom()")
+        .unwrap();
+    assert_eq!(bottom, 400.0);
+    assert!(
+        (right - 180.0).abs() < 0.001,
+        "follows the frame, not the native cursor centre: {left}..{right}"
+    );
+}
+
 /// `GetAnchorType` (`0x5313e0`, table `0x854198`) answers one string, `[+0x318]` through the name
 /// table `0x531530`; `_Nameplates.lua:479` compares it with what it passed to `SetOwner`.
 #[test]
