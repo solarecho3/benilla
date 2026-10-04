@@ -57,6 +57,7 @@ function Wait-Listen([int]$Port, [int]$Seconds, [string]$Name, [string]$ProcessN
 Wait-Listen 3724 30 "realmd" "realmd"
 # mangosd binds 8085 only after maps/bots load (~30s). Handshake before that is WSAECONNREFUSED.
 Wait-Listen 8085 180 "world" "mangosd"
+Wait-Listen 8787 30 "connector" $null
 
 $env:WOW_DATA = Join-Path $client "Data"
 $env:WOW_HOST = "127.0.0.1"
@@ -67,6 +68,7 @@ $env:WOW_HOST = "127.0.0.1"
 # of these by setting the env var before Play Benilla.bat.
 $diag = Join-Path $benilla "benilla-config\Diagnostics"
 New-Item -ItemType Directory -Force -Path $diag | Out-Null
+$gameUp = [bool](Get-Process -Name "benilla" -ErrorAction SilentlyContinue)
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 if (-not $env:WOW_STREAM_TRACE) { $env:WOW_STREAM_TRACE = Join-Path $diag "stream-$stamp.csv" }
 if (-not $env:WOW_FPS_JOURNAL) { $env:WOW_FPS_JOURNAL = Join-Path $diag "fps-$stamp.csv" }
@@ -77,6 +79,25 @@ if (-not $env:WOW_PERF_HUD) { $env:WOW_PERF_HUD = "1" }
 # 640x360 windowed probe (gxWindow ignored). WOW_BG=0 keeps a normal play window.
 if (-not $env:WOW_BG) { $env:WOW_BG = "0" }
 $log = Join-Path $diag "benilla-$stamp.log"
+if (-not $gameUp) {
+    $session = @{
+        stamp = $stamp
+        files = @{
+            stream = [System.IO.Path]::GetFileName($env:WOW_STREAM_TRACE)
+            fps    = [System.IO.Path]::GetFileName($env:WOW_FPS_JOURNAL)
+            pipe   = [System.IO.Path]::GetFileName($env:WOW_PIPE_TRACE)
+            log    = [System.IO.Path]::GetFileName($log)
+        }
+    }
+    [System.IO.File]::WriteAllText(
+        (Join-Path $diag "current.json"),
+        ($session | ConvertTo-Json -Depth 4)
+    )
+}
+
+Write-Host "Opening http://127.0.0.1:8787/log and /db"
+Start-Process "http://127.0.0.1:8787/log"
+Start-Process "http://127.0.0.1:8787/db"
 
 Set-Location $benilla
 Write-Host "Launching benilla (release) at native desktop size"
