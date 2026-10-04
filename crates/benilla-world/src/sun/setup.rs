@@ -178,13 +178,11 @@ pub(super) fn setup_sun(
             .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
             .fold(0.0_f32, f32::max)
             .max(1e-3);
-        // One material per patch, not per texture: each patch has its own transparency weight.
-        let tex_white = world_assets
+        // Fallback only when a patch's BLP is missing. Pretty Night binds nebulae and masks here;
+        // sampling Stars.blp on those huge cards smeared white streaks across the dome.
+        let fallback = world_assets
             .as_mut()
             .and_then(|a| a.texture("Environments\\Stars\\Stars.blp", (true, true), &mut images));
-        let tex_blue = world_assets
-            .as_mut()
-            .and_then(|a| a.texture("Environments\\Stars\\Stars2.blp", (true, true), &mut images));
         for sub in &subs {
             let positions: Vec<[f32; 3]> = sub
                 .positions
@@ -198,11 +196,15 @@ pub(super) fn setup_sun(
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sub.uvs.clone());
             mesh.insert_indices(Indices::U32(sub.indices.clone()));
-            let is_blue = sub
+            let tex = sub
                 .texture
                 .as_deref()
-                .is_some_and(|t| t.to_lowercase().contains("stars2"));
-            let tex = if is_blue { &tex_blue } else { &tex_white };
+                .and_then(|path| {
+                    world_assets
+                        .as_mut()
+                        .and_then(|a| a.texture(path, (sub.wrap_x, sub.wrap_y), &mut images))
+                })
+                .or_else(|| fallback.clone());
             // The batch's static transparency weight, baked as a loop; sampled at 0, as `Stars.m2`
             // is static.
             let weight = sub
@@ -210,19 +212,7 @@ pub(super) fn setup_sun(
                 .as_ref()
                 .and_then(|a| a.seq(None).weight.as_ref())
                 .map_or(1.0, |w| w.sample(0.0));
-            let mat = star_mats.add(StarMaterial {
-                base: StandardMaterial {
-                    base_color: Color::srgba(1.0, 1.0, 1.0, 0.0), // alpha driven per-frame
-                    base_color_texture: tex.clone(),
-                    unlit: true,
-                    cull_mode: None,
-                    alpha_mode: AlphaMode::Premultiplied,
-                    // The first sky draw: everything else paints over the stars.
-                    depth_bias: sky_order::STARS_BIAS,
-                    ..default()
-                },
-                extension: StarExt {},
-            });
+            let mat = star_mats.add(star_material(tex, sub.additive));
             commands.spawn((
                 Mesh3d(meshes.add(mesh)),
                 MeshMaterial3d(mat),
@@ -233,23 +223,37 @@ pub(super) fn setup_sun(
     } else {
         // Without assets, the procedural dot field.
         let star_dot = images.add(radial_sprite(32, 0.2, 1.0));
-        let star_mat = star_mats.add(StarMaterial {
-            base: StandardMaterial {
-                base_color: Color::srgba(1.0, 1.0, 1.0, 0.0),
-                base_color_texture: Some(star_dot),
-                unlit: true,
-                cull_mode: None,
-                alpha_mode: AlphaMode::Premultiplied,
-                depth_bias: sky_order::STARS_BIAS, // first sky draw, as above
-                ..default()
-            },
-            extension: StarExt {},
-        });
+        let star_mat = star_mats.add(star_material(Some(star_dot), false));
         commands.spawn((
             Mesh3d(meshes.add(star_field_mesh(350))),
             MeshMaterial3d(star_mat),
             Transform::default(),
             StarDome { weight: 1.0 },
         ));
+    }
+}
+
+/// One star-patch material: the patch BLP, the star-curve alpha rewritten each frame, and glow
+/// versus cover from the M2 blend (3/4 additive, else premultiplied).
+fn star_material(tex: Option<Handle<Image>>, additive: bool) -> StarMaterial {
+    StarMaterial {
+        base: StandardMaterial {
+            base_color: Color::srgba(1.0, 1.0, 1.0, 0.0), // alpha driven per-frame
+            base_color_texture: tex,
+            unlit: true,
+            cull_mode: None,
+            // Additive glow still takes the transparent pass; `StarExt` then sets `(ONE, ONE)`.
+            alpha_mode: if additive {
+                AlphaMode::Blend
+            } else {
+                AlphaMode::Premultiplied
+            },
+            // The first sky draw: everything else paints over the stars.
+            depth_bias: sky_order::STARS_BIAS,
+            ..default()
+        },
+        extension: StarExt {
+            additive: Vec4::new(if additive { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0),
+        },
     }
 }

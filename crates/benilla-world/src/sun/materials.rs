@@ -6,7 +6,8 @@ use bevy::pbr::{
 };
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, RenderPipelineDescriptor,
+    SpecializedMeshPipelineError,
 };
 use bevy::shader::ShaderRef;
 
@@ -57,12 +58,32 @@ impl MaterialExtension for CelestialExt {
 /// `clamp(30·dir.y, 0, 1)`, a soft edge over the bottom ~1.9° of elevation; at or below 0 it clips.
 pub(super) const DISC_HORIZON_FADE: f32 = 30.0;
 
-/// The star patches, blended premultiplied in gamma space by `star.wgsl`, like the reference.
+/// The star patches. Blend-2 cards cover premultiplied in gamma; blend 3/4 glow cards add
+/// `(ONE, ONE)` like [`benilla_assets::materials::WowModelExt`], so a nebula does not stain the dome.
 pub type StarMaterial = ExtendedMaterial<StandardMaterial, StarExt>;
 
-/// No uniforms: the star fragment reads the base colour's alpha, the star-curve fade.
+/// Pipeline key: additive glow (`Stars.m2` blend 3/4) versus premultiplied cover (blend 2).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct StarPipelineKey {
+    additive: bool,
+}
+
+impl From<&StarExt> for StarPipelineKey {
+    fn from(e: &StarExt) -> Self {
+        Self {
+            additive: e.additive.x > 0.5,
+        }
+    }
+}
+
+/// `.x` 1: M2 blend 3/4 glow, `(ONE, ONE)` in `specialize`; `.x` 0: premultiplied cover.
+/// The star-curve fade rides `StandardMaterial::base_color` alpha, sampled each frame.
 #[derive(Asset, AsBindGroup, Clone, TypePath, Default)]
-pub struct StarExt {}
+#[bind_group_data(StarPipelineKey)]
+pub struct StarExt {
+    #[uniform(100)]
+    pub(super) additive: Vec4,
+}
 
 impl MaterialExtension for StarExt {
     /// The shared sky vertex stage, the far-depth pin ([`crate::sky_order`]).
@@ -78,9 +99,56 @@ impl MaterialExtension for StarExt {
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialExtensionKey<Self>,
+        key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         sky_pipeline_state(descriptor);
+        if key.bind_group_data.additive {
+            // Gamma-space add, matching WowModel glow cards. `AlphaMode::Add` linearises and
+            // fattens the nebula's soft edge.
+            if let Some(target) = descriptor
+                .fragment
+                .as_mut()
+                .and_then(|f| f.targets.get_mut(0))
+                .and_then(|t| t.as_mut())
+            {
+                target.blend = Some(BlendState {
+                    color: BlendComponent {
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Add,
+                    },
+                    alpha: BlendComponent {
+                        src_factor: BlendFactor::Zero,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Add,
+                    },
+                });
+            }
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod star_shader_tests {
+    use super::{StarExt, StarPipelineKey};
+
+    #[test]
+    fn star_fragment_keeps_texel_rgb_in_gamma() {
+        let src = include_str!("../shaders/star.wgsl");
+        assert!(
+            src.contains("c.rgb * a") && !src.contains("vec3<f32>(a)"),
+            "star.wgsl must emit texel RGB, not alpha-as-white — Pretty Night nebula cards smeared \
+             Stars.blp as white streaks when RGB was discarded"
+        );
+    }
+
+    #[test]
+    fn additive_star_ext_keys_the_glow_pipeline() {
+        assert!(!StarPipelineKey::from(&StarExt::default()).additive);
+        let glow = StarExt {
+            additive: bevy::prelude::Vec4::new(1.0, 0.0, 0.0, 0.0),
+        };
+        assert!(StarPipelineKey::from(&glow).additive);
     }
 }
