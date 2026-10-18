@@ -187,7 +187,26 @@ pub fn load_item_display_catalog(chain: &mut Chain) -> Result<ItemDisplayCatalog
         .read_file(ITEM_DISPLAY_INFO)
         .with_context(|| format!("reading {ITEM_DISPLAY_INFO}"))?;
     let rs = parse(&bytes, item_display_info_schema(), "ItemDisplayInfo")?;
-    Ok(catalog_from_records(rs))
+    let mut cat = catalog_from_records(rs);
+    restore_stormwind_plate_helms(&mut cat);
+    Ok(cat)
+}
+
+/// patch-G renamed the Stormwind plate cap to a visor-only uprez. HD character bodies keep hair
+/// on geoset 0, so that visor sits on a full head. Restore the vanilla cap and its skin.
+fn restore_stormwind_plate_helms(cat: &mut ItemDisplayCatalog) {
+    const UPREZ: &str = "helm_plate_allianceuprez_b_01.m2";
+    let vanilla_model = model_path("Helm_Plate_B_01Stormwind.mdx");
+    const VANILLA_TEX: &str = "Helm_Plate_B_01Stormwind";
+    for d in cat.displays.values_mut() {
+        if d.model[0]
+            .as_deref()
+            .is_some_and(|m| m.eq_ignore_ascii_case(UPREZ))
+        {
+            d.model[0] = Some(vanilla_model.clone());
+            d.model_texture[0] = Some(VANILLA_TEX.to_string());
+        }
+    }
 }
 
 #[cfg(test)]
