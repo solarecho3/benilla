@@ -25,6 +25,10 @@ use select::{Mode, Special};
 mod twist;
 pub(crate) use twist::{wrap_pi, BodyTwist};
 
+/// The driven body's head look, composed onto Head after the strafe twist.
+mod head_look;
+pub(crate) use head_look::HeadLook;
+
 /// Parks an off-frustum rig's pose while its clocks run, as the reference does not tick one
 /// (`0x683dd0`); a parked unit's events fire only for a `MORE_AUDIBLE` template.
 mod lod;
@@ -746,6 +750,7 @@ impl Plugin for CreatureAnimPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
         twist::plugin(app);
+        head_look::plugin(app);
         lod::plugin(app);
         breath::register(app);
         // The breath classifier runs at its own 10 s cadence, outside the chain.

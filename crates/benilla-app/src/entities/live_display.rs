@@ -119,6 +119,7 @@ pub(super) fn refresh_live_display(
                         (
                             benilla_world::rig_anim::RigPose,
                             crate::creature_anim::BodyTwist,
+                            crate::creature_anim::HeadLook,
                             benilla_world::rig_anim::GlobalSeqDrive,
                         ),
                         benilla_world::rig_palette::RigSkin,
@@ -244,6 +245,7 @@ pub(super) fn heal_rig_starved(
                 (
                     benilla_world::rig_anim::RigPose,
                     crate::creature_anim::BodyTwist,
+                    crate::creature_anim::HeadLook,
                     benilla_world::rig_anim::GlobalSeqDrive,
                 ),
                 benilla_world::rig_palette::RigSkin,

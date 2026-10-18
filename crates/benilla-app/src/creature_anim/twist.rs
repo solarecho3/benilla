@@ -23,6 +23,15 @@ impl BodyTwist {
             head: head.map(Channel::new),
         }
     }
+
+    /// The head bone now holds `written`, composed on top of this frame's twist by the look pass.
+    /// Next frame `cur == last_out` keeps the animated base; leaving `last_out` at the twist-only
+    /// quaternion would read the look as a new key and stack another twist on it.
+    pub(crate) fn note_head_written(&mut self, written: Quat) {
+        if let Some(ch) = &mut self.head {
+            ch.last_out = written;
+        }
+    }
 }
 
 /// One twist channel's bone and bookkeeping.
@@ -66,7 +75,7 @@ fn twist_shares(gap: f32) -> (f32, f32) {
 /// and Head always, so a rider's head keeps its share and stops short of the aim. A mounted spine
 /// share is zero, not skipped: the zero write restores the animated base, the reference's disarm
 /// (`0x711f10(4, 0, 0x80)`), where skipping would freeze the last twist.
-fn armed_shares(gap: f32, mounted: bool) -> (f32, f32) {
+pub(crate) fn armed_shares(gap: f32, mounted: bool) -> (f32, f32) {
     let (spine, head) = twist_shares(gap);
     (if mounted { 0.0 } else { spine }, head)
 }
@@ -75,7 +84,7 @@ fn armed_shares(gap: f32, mounted: bool) -> (f32, f32) {
 /// yaws its subtree about world up through the bone's pivot, `local' = local · Quat(g⁻¹·Y, θ)`
 /// with `g` the bone's rotation up to the unit. The head runs after the spine, so it turns relative
 /// to the twisted spine, as the client composes the residual gap.
-pub(super) fn apply_body_twist(
+pub(crate) fn apply_body_twist(
     // A parked rig is skipped; on wake, `cur != last_out` re-seats `base`.
     mut units: Query<(Entity, &mut BodyTwist), Without<benilla_world::rig_anim::AnimParked>>,
     mut rigs: Query<&mut benilla_world::rig_anim::RigPose>,
@@ -187,6 +196,11 @@ pub(super) fn plugin(app: &mut App) {
 fn twist_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var_os("WOW_NO_TWIST").is_some())
+}
+
+/// The same lever as [`twist_off`], for the head-look pass that composes after the twist.
+pub(crate) fn twist_stood_down() -> bool {
+    twist_off()
 }
 
 #[cfg(test)]

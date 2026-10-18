@@ -586,6 +586,13 @@ pub(super) fn attach_entity_visuals(
                         .entity(entity)
                         .insert(crate::creature_anim::BodyTwist::new(spine, head));
                 }
+                // The local body's look-at uses the same head key-bone. A model without one
+                // cannot turn its face, so it gets no channel.
+                if let Some(head) = head {
+                    commands
+                        .entity(entity)
+                        .insert(crate::creature_anim::HeadLook::new(head));
+                }
             }
             // The worn geoset selectors, the helm's hide-mask rows included (`0x4799a0`).
             let equip_geosets = equip_geosets(
