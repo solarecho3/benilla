@@ -95,9 +95,8 @@ if (-not $gameUp) {
     )
 }
 
-Write-Host "Opening http://127.0.0.1:8787/log and /db"
-Start-Process "http://127.0.0.1:8787/log"
-Start-Process "http://127.0.0.1:8787/db"
+Write-Host "Opening http://127.0.0.1:8787/ui"
+Start-Process "http://127.0.0.1:8787/ui"
 
 Set-Location $benilla
 Write-Host "Launching benilla (release) at native desktop size"
