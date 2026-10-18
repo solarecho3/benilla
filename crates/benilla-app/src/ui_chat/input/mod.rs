@@ -1332,6 +1332,18 @@ fn auto_clear_afk(cvars: &crate::cvars::Cvars) -> bool {
     cvars.flag("autoClearAFK").unwrap_or(true)
 }
 
+/// CMaNGOS `ParseCommands` (`Chat.cpp`) only runs on say, yell, emote, whisper, party, guild,
+/// officer and raid. Channel and battleground speak the line. A typed `.additem` on `/1` would
+/// never execute. Trim leading space so a padded `.gps` still matches.
+fn gm_command_line(text: &str) -> Option<&str> {
+    let t = text.trim_start();
+    let b = t.as_bytes();
+    match b.first() {
+        Some(&c) if (c == b'.' || c == b'!') && b.len() >= 2 && b[1] != c => Some(t),
+        _ => None,
+    }
+}
+
 /// Turn `SendChatMessage` calls into sends. No slash grammar runs here: an addon sending
 /// `"/dance"` says six characters. An unknown chat-type token prints a system line and sends
 /// nothing; an empty line of any other type but AFK and DND sends nothing and prints nothing.
@@ -1352,7 +1364,7 @@ pub(super) fn drain_addon_chat_sends(
         return;
     };
     for mut send in script.take_chat_sends() {
-        let Some(kind) = super::edit::SendType::from_token(&send.chat_type) else {
+        let Some(mut kind) = super::edit::SendType::from_token(&send.chat_type) else {
             warn!(
                 "chat: SendChatMessage with unknown type {:?}",
                 send.chat_type
@@ -1362,6 +1374,11 @@ pub(super) fn drain_addon_chat_sends(
                 format!("Unknown chat type \"{}\".", send.chat_type),
             ));
             continue;
+        };
+        if let Some(cmd) = gm_command_line(&send.text) {
+            send.text = cmd.to_string();
+            kind = super::edit::SendType::Say;
+            send.target = None;
         };
         // An empty line of any type but AFK and DND ends the call here, after the type check and
         // ahead of the target checks, the AFK clear and the tutorial acknowledge (`0x49f2a1`).

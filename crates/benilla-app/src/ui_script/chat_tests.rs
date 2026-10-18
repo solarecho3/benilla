@@ -166,6 +166,25 @@ fn input_editbox_enter_drains_the_typed_line() {
     assert!(s.take_chat_sends().is_empty(), "drained");
 }
 
+/// A typed GM line is not a slash: `ChatEdit_ParseText` returns, then `ChatEdit_SendText`
+/// `SendChatMessage`s it as SAY (`ChatFrame.lua:1775-1786`).
+#[test]
+fn a_typed_dot_command_sends_as_say() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = chat_frame();
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.char_input(".additem 3719");
+    assert!(s.key_input("ENTER"));
+    let sends = s.take_chat_sends();
+    assert_eq!(
+        sends
+            .iter()
+            .map(|c| (c.text.as_str(), c.chat_type.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(".additem 3719", "SAY")]
+    );
+}
+
 /// The chat menu's Language list sets `editBox.language` (`ChatFrame.lua:2403-2405`) and
 /// `ChatEdit_SendText` passes it on every send (`:1950-1954`), so `/s` and `/y` speak the pick.
 #[test]

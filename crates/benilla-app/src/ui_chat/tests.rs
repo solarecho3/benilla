@@ -2459,6 +2459,67 @@ fn afk_then_dnd_clears_the_afk_first() {
     assert!(!world.resource::<super::away::AfkMirror>().is_afk());
 }
 
+/// CMaNGOS skips `ParseCommands` on CHANNEL. A `.`/`!` line is rewritten to SAY so `.additem`
+/// still runs when the box is on `/1`.
+#[test]
+fn a_dot_command_on_channel_rides_say() {
+    use super::edit::{ChannelSlot, ChannelState};
+    use crate::net::{ChatKind, ClientCommand, NetCommands};
+    use bevy::ecs::system::RunSystemOnce;
+
+    let mut world = bevy::prelude::World::new();
+    world.insert_non_send_resource(benilla_ui::script::UiScript::new().expect("VM"));
+    let (tx, rx) = crossbeam_channel::unbounded();
+    world.insert_resource(NetCommands(tx));
+    world.init_resource::<super::feed::ChatLog>();
+    world.init_resource::<super::away::AfkMirror>();
+    world.init_resource::<crate::cvars::Cvars>();
+    world.insert_resource(ChannelState {
+        joined: vec![Some(ChannelSlot::joined("General - Elwynn Forest"))],
+        ..Default::default()
+    });
+    world
+        .non_send_resource::<benilla_ui::script::UiScript>()
+        .run(
+            r#"
+            SendChatMessage(".additem 3719", "CHANNEL", nil, 1)
+            SendChatMessage(" .gps", "PARTY")
+            SendChatMessage("..hello", "CHANNEL", nil, 1)
+            SendChatMessage("hello", "CHANNEL", nil, 1)
+            "#,
+        )
+        .expect("lua");
+    world
+        .run_system_once(super::input::drain_addon_chat_sends)
+        .expect("drain");
+    let sent: Vec<(ChatKind, Option<String>, String)> = rx
+        .try_iter()
+        .map(|c| match c {
+            ClientCommand::Chat {
+                kind, target, text, ..
+            } => (kind, target, text),
+            other => panic!("unexpected command {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            (ChatKind::Say, None, ".additem 3719".into()),
+            (ChatKind::Say, None, ".gps".into()),
+            (
+                ChatKind::Channel,
+                Some("General - Elwynn Forest".into()),
+                "..hello".into()
+            ),
+            (
+                ChatKind::Channel,
+                Some("General - Elwynn Forest".into()),
+                "hello".into()
+            ),
+        ]
+    );
+}
+
 /// `SendChatMessage`'s language through the real drain: the id the binding resolved rides every
 /// type's packet (`0x49f6f9`) but AFK's, whose `SetAFK` (`0x5eb740`) never reads it.
 #[test]
